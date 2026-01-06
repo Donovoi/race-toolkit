@@ -367,13 +367,29 @@ class RFCOMMBumbleChecker(BumbleTransport):
             return
 
     async def check_UUIDs(self):
-        # Connect to the remote device
-        self.connection = await self.device.connect(
-            self.address, transport=BT_BR_EDR_TRANSPORT
-        )
-        await self.connection.request_remote_name()
+        # Connect to the remote device with timeout
+        try:
+            self.connection = await asyncio.wait_for(
+                self.device.connect(
+                    self.address, transport=BT_BR_EDR_TRANSPORT),
+                timeout=30.0  # 30 second timeout for Bluetooth Classic connection
+            )
+        except asyncio.TimeoutError:
+            logging.error("Connection timed out after 30 seconds.")
+            raise ConnectionError("Connection timed out") from None
 
-        channels = await find_rfcomm_channels(self.connection)
+        try:
+            await asyncio.wait_for(
+                self.connection.request_remote_name(),
+                timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            logging.warning("Remote name request timed out.")
+
+        channels = await asyncio.wait_for(
+            find_rfcomm_channels(self.connection),
+            timeout=30.0  # 30 second timeout for SDP query
+        )
         for chn in channels:
             uuid = RFCOMMTransport._matches_any_known_uuid(channels[chn])
             if uuid:
@@ -381,37 +397,54 @@ class RFCOMMBumbleChecker(BumbleTransport):
         return None
 
     async def check_auth_vuln(self):
-        """Check Classic authentication issue by connecting via HfP. This makes it independant of whether RACE is exposed via RFCOMM."""
+        """Check Classic authentication issue by connecting via HfP.
 
+        This makes it independent of whether RACE is exposed via RFCOMM.
+        """
+        rfcomm_client = None
         try:
-            if not (hfp_record := await hfp.find_hf_sdp_record(self.connection)):
+            hfp_record = await asyncio.wait_for(
+                hfp.find_hf_sdp_record(self.connection),
+                timeout=15.0
+            )
+            if not hfp_record:
                 logging.warning("HfP Service not found.")
                 return False
 
             channel, _, _ = hfp_record
 
             rfcomm_client = RFCOMM_Client(self.connection)
-            rfcomm_mux = await rfcomm_client.start()
+            rfcomm_mux = await asyncio.wait_for(
+                rfcomm_client.start(),
+                timeout=15.0
+            )
 
-            session = await rfcomm_mux.open_dlc(channel)
+            session = await asyncio.wait_for(
+                rfcomm_mux.open_dlc(channel),
+                timeout=15.0
+            )
             if session:
                 await rfcomm_mux.disconnect()
                 return True
             return False
+        except asyncio.TimeoutError:
+            logging.warning("HfP connection check timed out.")
+            return False
         except asyncio.CancelledError as e:
-            logging.warning(f"Error connecting to device via HfP ({e}).")
+            logging.warning("Error connecting to device via HfP (%s).", e)
             return False
         except BumbleConnectionError as e:
-            logging.warning(f"Error connecting to device via HfP ({e}).")
+            logging.warning("Error connecting to device via HfP (%s).", e)
             return False
-            return False
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.warning(
-                f"Error while checking Bluetooth Classic authentication ({e})."
+                "Error while checking Bluetooth Classic authentication (%s).",
+                e
             )
             return False
         finally:
-            await rfcomm_client.shutdown()
+            if rfcomm_client:
+                await rfcomm_client.shutdown()
 
 
 class GATTBumbleTransport(BumbleTransport):

@@ -735,11 +735,119 @@ def _is_valid_dump(data: bytes, threshold: float = 0.95) -> bool:
     return True
 
 
-def _print_vulnerability_summary(vulnerabilities: list[Vulnerability]) -> None:
-    """Print a summary of vulnerability check results."""
+def _print_vulnerability_summary(
+    vulnerabilities: list[Vulnerability],
+    bdaddr: str | bytes | None = None,
+    controller: str = "usb:0"
+) -> None:
+    """Print a summary of vulnerability check results with actionable suggestions."""
     logging.info("Vulnerability status summary:")
     for v in vulnerabilities:
         logging.info("  [%-10s] %s: %s", v.status.name, v.id, v.description)
+
+    # Collect vulnerable items for suggestions
+    vulnerable = [v for v in vulnerabilities
+                  if v.status == VulnerabilityStatus.VULNERABLE]
+
+    if not vulnerable:
+        return
+
+    logging.info("")
+    logging.info("=" * 60)
+    logging.info("SUGGESTED NEXT STEPS")
+    logging.info("=" * 60)
+
+    # Convert bdaddr to string if needed
+    addr_str: str | None = None
+    if isinstance(bdaddr, bytes):
+        addr_str = bdaddr.decode("ascii", errors="ignore")
+    elif isinstance(bdaddr, str):
+        addr_str = bdaddr
+
+    addr_arg = f"--target-address {addr_str}" if addr_str else "--target-address <device_address>"
+
+    for v in vulnerable:
+        logging.info("")
+        if v.id == "CVE-2025-20700":
+            logging.info("[%s] GATT Authentication Bypass", v.id)
+            logging.info("  The device allows unauthenticated GATT access.")
+            logging.info("  Try extracting sensitive data:")
+            logging.info("")
+            logging.info("  # Dump firmware from flash memory:")
+            logging.info("    python race_toolkit.py %s flash -o firmware.bin",
+                         addr_arg)
+            logging.info("")
+            logging.info("  # Extract Bluetooth link keys (pairing secrets):")
+            logging.info("    python race_toolkit.py %s link-keys", addr_arg)
+            logging.info("")
+            logging.info("  # Get device Bluetooth address:")
+            logging.info("    python race_toolkit.py %s bdaddr", addr_arg)
+
+        elif v.id == "CVE-2025-20701":
+            logging.info("[%s] BR/EDR Authentication Bypass", v.id)
+            logging.info("  The device accepts connections WITHOUT pairing!")
+            logging.info(
+                "  An attacker can connect to Bluetooth profiles directly.")
+            logging.info("")
+            logging.info("  # Enumerate accessible RFCOMM services:")
+            logging.info(
+                "    python race_toolkit.py -c %s %s enumerate-classic",
+                controller, addr_arg
+            )
+            logging.info("")
+            logging.info("  # Check for RACE protocol exposure:")
+            logging.info(
+                "    python race_toolkit.py -c %s %s enumerate-race",
+                controller, addr_arg
+            )
+
+        elif v.id == "CVE-2025-20702_LE":
+            logging.info("[%s] RACE Protocol via BLE", v.id)
+            logging.info(
+                "  The RACE debug protocol is exposed over Bluetooth LE!")
+            logging.info("  Try extracting sensitive data:")
+            logging.info("")
+            logging.info("  # Dump firmware from flash:")
+            logging.info("    python race_toolkit.py %s flash -o firmware.bin",
+                         addr_arg)
+            logging.info("")
+            logging.info("  # Dump RAM for secrets/keys:")
+            logging.info(
+                "    python race_toolkit.py %s ram --address 0x0 --size 0x10000 -o ram.bin",
+                addr_arg
+            )
+            logging.info("")
+            logging.info("  # Extract Bluetooth link keys:")
+            logging.info("    python race_toolkit.py %s link-keys -o keys.bin",
+                         addr_arg)
+
+        elif v.id == "CVE-2025-20702_BR_EDR":
+            logging.info("[%s] RACE Protocol via Bluetooth Classic", v.id)
+            logging.info(
+                "  The RACE debug protocol is exposed over Bluetooth Classic!"
+            )
+            logging.info("  Try extracting sensitive data:")
+            logging.info("")
+            logging.info("  # Dump firmware from flash:")
+            logging.info(
+                "    python race_toolkit.py -c %s %s flash -o firmware.bin",
+                controller, addr_arg
+            )
+            logging.info("")
+            logging.info("  # Dump RAM for secrets/keys:")
+            logging.info(
+                "    python race_toolkit.py -c %s %s ram --address 0x0 --size 0x10000 -o ram.bin",
+                controller, addr_arg
+            )
+            logging.info("")
+            logging.info("  # Extract Bluetooth link keys:")
+            logging.info(
+                "    python race_toolkit.py -c %s %s link-keys -o keys.bin",
+                controller, addr_arg
+            )
+
+    logging.info("")
+    logging.info("=" * 60)
 
 
 async def command_check(args: argparse.Namespace):
@@ -914,11 +1022,11 @@ async def command_check(args: argparse.Namespace):
     response = input().strip().lower()
     if response in ("q", "quit", "exit"):
         logging.info("Exiting.")
-        _print_vulnerability_summary(vulnerabilities)
+        _print_vulnerability_summary(vulnerabilities, bdaddr, controller)
         return
     if response in ("n", "no"):
         logging.info("Skipping Bluetooth Classic checks.")
-        _print_vulnerability_summary(vulnerabilities)
+        _print_vulnerability_summary(vulnerabilities, bdaddr, controller)
         return
 
     # Step 2: Classic Checks.
@@ -941,7 +1049,7 @@ async def command_check(args: argparse.Namespace):
             logging.error(
                 "Cannot proceed without a Bluetooth Classic address.")
             # Print summary of what we found so far
-            _print_vulnerability_summary(vulnerabilities)
+            _print_vulnerability_summary(vulnerabilities, bdaddr, controller)
             return
         # Need to release again after scanning
         release_bluetooth_controller(controller)
@@ -1097,7 +1205,7 @@ async def command_check(args: argparse.Namespace):
             _get_vuln(
                 vulnerabilities, "CVE-2025-20702_BR_EDR").status = VulnerabilityStatus.FIXED
 
-    _print_vulnerability_summary(vulnerabilities)
+    _print_vulnerability_summary(vulnerabilities, bdaddr, controller)
 
     # Output collected firmware dumps
     if collected_dumps:
