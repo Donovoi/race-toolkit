@@ -38,7 +38,7 @@ Enhanced reliability when connecting to Bluetooth devices:
 
 | Commit | Description |
 |--------|-------------|
-| `cc609a3` | Add USB Bluetooth controller reset functionality and improve error handling in connection retries - Initial changes including all improvements listed above |
+| `cc609a3` | USB controller reset and improved connection retry logic |
 
 ---
 
