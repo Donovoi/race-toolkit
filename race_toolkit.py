@@ -5,6 +5,8 @@ and CVE-2025-20702 vulnerabilities, as well as dumping firmware and memory
 from affected devices.
 """
 import sys
+import os
+import glob
 import struct
 import logging
 import asyncio
@@ -12,6 +14,7 @@ import argparse
 import subprocess
 import time
 import traceback
+import fcntl
 
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -102,8 +105,145 @@ def release_bluetooth_controller(controller: str):
         "Bluetooth controller %s should now be available", controller)
 
 
-def reset_hci_controller(hci_device: str = "hci0") -> bool:
-    """Reset the HCI Bluetooth controller to clear stuck connections.
+def reset_usb_bluetooth_controller(controller: str) -> bool:
+    """Reset a USB Bluetooth controller to clear stuck connections.
+
+    For USB controllers used directly by bumble (usb:VID:PID format),
+    we need to do a USB device reset rather than HCI reset.
+
+    Args:
+        controller: Controller specification (e.g., "usb:0", "usb:0BDA:8771").
+
+    Returns:
+        True if reset was successful, False otherwise.
+    """
+    if not controller.startswith("usb:"):
+        # For non-USB controllers, try HCI reset
+        return _reset_hci_controller("hci0")
+
+    logging.info("Resetting USB Bluetooth controller...")
+
+    # Try to find and reset the USB device
+    try:
+        import usb1
+        ctx = usb1.USBContext()
+
+        # Find Bluetooth devices (class 0xE0)
+        bt_devices = []
+        for dev in ctx.getDeviceList():
+            is_bt = False
+            try:
+                if dev.getDeviceClass() == 0xE0:
+                    is_bt = True
+                else:
+                    for cfg in dev:
+                        for intf in cfg:
+                            for setting in intf:
+                                if setting.getClass() == 0xE0:
+                                    is_bt = True
+                                    break
+            except usb1.USBError:
+                pass
+            if is_bt:
+                bt_devices.append(dev)
+
+        if not bt_devices:
+            logging.warning("No USB Bluetooth devices found to reset.")
+            return False
+
+        # Reset the first Bluetooth device found
+        dev = bt_devices[0]
+        vid = dev.getVendorID()
+        pid = dev.getProductID()
+        bus = dev.getBusNumber()
+        addr = dev.getDeviceAddress()
+
+        logging.debug(
+            "Resetting USB device %04x:%04x (bus %d, addr %d)...",
+            vid, pid, bus, addr
+        )
+
+        # Method 1: Try USBDEVFS_RESET ioctl (most reliable)
+        # This is the same as running 'usbreset' command
+        usbdevfs_reset = 21780  # USBDEVFS_RESET from linux/usbdevice_fs.h
+        dev_path = f"/dev/bus/usb/{bus:03d}/{addr:03d}"
+
+        if os.path.exists(dev_path):
+            try:
+                logging.debug("Resetting via ioctl on %s", dev_path)
+                with open(dev_path, 'wb') as f:
+                    fcntl.ioctl(f.fileno(), usbdevfs_reset, 0)
+                logging.info("USB Bluetooth controller reset successfully.")
+                time.sleep(2.0)  # Give device time to reinitialize
+                return True
+            except PermissionError:
+                logging.debug("Permission denied for ioctl, trying sudo...")
+                # Try with sudo using usbreset if available
+                result = subprocess.run(
+                    ["sudo", "usbreset", f"{vid:04x}:{pid:04x}"],
+                    capture_output=True, timeout=10, check=False
+                )
+                if result.returncode == 0:
+                    logging.info(
+                        "USB Bluetooth controller reset successfully.")
+                    time.sleep(2.0)
+                    return True
+            except (IOError, OSError) as e:
+                logging.debug("ioctl reset failed: %s", e)
+
+        # Method 2: Fallback to sysfs authorized file
+        sysfs_path = f"/sys/bus/usb/devices/{bus}-*"
+        device_paths = glob.glob(sysfs_path)
+
+        for path in device_paths:
+            try:
+                vendor_path = f"{path}/idVendor"
+                product_path = f"{path}/idProduct"
+                if os.path.exists(vendor_path) and os.path.exists(product_path):
+                    with open(vendor_path, "r", encoding="ascii") as f:
+                        dev_vid = int(f.read().strip(), 16)
+                    with open(product_path, "r", encoding="ascii") as f:
+                        dev_pid = int(f.read().strip(), 16)
+                    if dev_vid == vid and dev_pid == pid:
+                        auth_path = f"{path}/authorized"
+                        if os.path.exists(auth_path):
+                            logging.debug("Resetting via %s", auth_path)
+                            subprocess.run(
+                                ["sudo", "sh", "-c", f"echo 0 > {auth_path}"],
+                                capture_output=True, timeout=5, check=False
+                            )
+                            time.sleep(1.0)
+                            subprocess.run(
+                                ["sudo", "sh", "-c", f"echo 1 > {auth_path}"],
+                                capture_output=True, timeout=5, check=False
+                            )
+                            time.sleep(3.0)  # Longer wait after sysfs reset
+                            logging.info(
+                                "USB Bluetooth controller reset successfully."
+                            )
+                            return True
+            except (IOError, OSError, ValueError):
+                continue
+
+        # Last resort: just wait longer
+        logging.warning(
+            "Could not reset USB device. "
+            "Waiting for controller to recover..."
+        )
+        time.sleep(5.0)
+        return False
+
+    except ImportError:
+        logging.warning("usb1 not available for USB reset")
+        return False
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("USB reset failed: %s", e)
+        return False
+        return False
+
+
+def _reset_hci_controller(hci_device: str = "hci0") -> bool:
+    """Reset the HCI Bluetooth controller (for built-in adapters).
 
     Args:
         hci_device: The HCI device name (default: hci0).
@@ -111,7 +251,7 @@ def reset_hci_controller(hci_device: str = "hci0") -> bool:
     Returns:
         True if reset was successful, False otherwise.
     """
-    logging.info("Resetting Bluetooth controller %s...", hci_device)
+    logging.debug("Attempting HCI reset for %s...", hci_device)
     try:
         # First bring the device down
         subprocess.run(
@@ -131,19 +271,18 @@ def reset_hci_controller(hci_device: str = "hci0") -> bool:
         )
 
         if result.returncode == 0:
-            logging.info(
-                "Bluetooth controller %s reset successfully.", hci_device)
-            time.sleep(0.5)  # Give it time to reinitialize
+            logging.debug("HCI controller %s reset successfully.", hci_device)
+            time.sleep(0.5)
             return True
         else:
-            logging.warning(
-                "Failed to reset %s: %s",
+            logging.debug(
+                "HCI reset failed for %s: %s",
                 hci_device,
                 result.stderr.decode() if result.stderr else "unknown error"
             )
             return False
     except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as e:
-        logging.warning("Could not reset HCI controller: %s", e)
+        logging.debug("Could not reset HCI controller: %s", e)
         return False
 
 
@@ -817,44 +956,74 @@ async def command_check(args: argparse.Namespace):
 
     check_classic = True
     uuid = None
-    try:
-        uuid = await classic_checker.check_UUIDs()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        # Catch all exceptions including bumble.core.ConnectionError
-        error_str = str(e).lower()
-        if "limited_resources" in error_str:
-            logging.error(
-                "Connection rejected - controller resources exhausted."
-            )
-            # Try to reset the controller and retry
-            await classic_checker.close()
-            reset_hci_controller()
-            release_bluetooth_controller(controller)
-            logging.info("Retrying connection after reset...")
-            classic_checker = RFCOMMBumbleChecker(
-                controller, bdaddr_str, False)
-            await classic_checker.setup()
-            try:
-                uuid = await classic_checker.check_UUIDs()
-            except Exception as retry_e:  # pylint: disable=broad-exception-caught
-                logging.error("Retry failed: %s", retry_e)
+    max_retries = 3
+    retry_delay = 3.0  # Start with 3 seconds
+
+    for attempt in range(max_retries + 1):
+        try:
+            uuid = await classic_checker.check_UUIDs()
+            break  # Success, exit retry loop
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # Catch all exceptions including bumble.core.ConnectionError
+            error_str = str(e).lower()
+            if "limited_resources" in error_str:
+                if attempt == 0:
+                    logging.error(
+                        "Connection rejected by remote device - "
+                        "device has too many active connections."
+                    )
+                    logging.info(
+                        "This usually means the target device needs time "
+                        "to free up connection slots."
+                    )
+                else:
+                    logging.warning("Retry %d/%d failed.",
+                                    attempt, max_retries)
+
+                if attempt < max_retries:
+                    await classic_checker.close()
+                    # Reset our controller just in case
+                    reset_usb_bluetooth_controller(controller)
+                    release_bluetooth_controller(controller)
+                    logging.info(
+                        "Waiting %.1f seconds before retry %d/%d...",
+                        retry_delay, attempt + 1, max_retries
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 1.5  # Exponential backoff
+                    classic_checker = RFCOMMBumbleChecker(
+                        controller, bdaddr_str, False)
+                    await classic_checker.setup()
+                else:
+                    logging.error(
+                        "All %d retries exhausted. The target device may be "
+                        "busy or have too many connections.", max_retries
+                    )
+                    logging.info(
+                        "Try again later or disconnect other devices from the "
+                        "target."
+                    )
+                    logging.info(
+                        "Skipping the rest of Bluetooth Classic checks."
+                    )
+                    check_classic = False
+                    await classic_checker.close()
+            elif "page_timeout" in error_str:
+                logging.error(
+                    "Device not responding. Is it powered on and in range?"
+                )
                 logging.info("Skipping the rest of Bluetooth Classic checks.")
                 check_classic = False
                 await classic_checker.close()
-        elif "page_timeout" in error_str:
-            logging.error(
-                "Device not responding. Is it powered on and in range?"
-            )
-            logging.info("Skipping the rest of Bluetooth Classic checks.")
-            check_classic = False
-            await classic_checker.close()
-        else:
-            logging.error(
-                "Unable to create a Bluetooth Classic connection: %s", e
-            )
-            logging.info("Skipping the rest of Bluetooth Classic checks.")
-            check_classic = False
-            await classic_checker.close()
+                break
+            else:
+                logging.error(
+                    "Unable to create a Bluetooth Classic connection: %s", e
+                )
+                logging.info("Skipping the rest of Bluetooth Classic checks.")
+                check_classic = False
+                await classic_checker.close()
+                break
 
     if check_classic:
         logging.info(
@@ -1066,56 +1235,87 @@ async def command_enumerate_classic(args: argparse.Namespace):
     logging.info("Connecting to %s without authentication...",
                  target_address)
 
-    try:
-        # Connect without authentication
-        if checker.device is None:
-            logging.error("Bluetooth device not initialized")
-            return
-        checker.connection = await checker.device.connect(  # type: ignore[misc]
-            target_address, transport=BT_BR_EDR_TRANSPORT
-        )
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        error_str = str(e).lower()
-        logging.error("Connection failed: %s", e)
-        logging.info("")
+    max_retries = 3
+    retry_delay = 3.0
+    connected = False
 
-        if "page_timeout" in error_str:
-            logging.info("PAGE TIMEOUT - The device did not respond.")
-            logging.info("Possible causes:")
-            logging.info("  1. Device is out of range (try moving closer)")
-            logging.info("  2. Device is powered off or in sleep mode")
-            logging.info("  3. Device is not in connectable mode")
-            logging.info("  4. Bluetooth address may be incorrect")
-            logging.info("")
-            logging.info(
-                "Tip: Make sure the target device is awake and nearby.")
-        elif "limited_resources" in error_str:
-            logging.info("Controller resources exhausted. Resetting...")
-            await checker.close()
-            reset_hci_controller()
-            release_bluetooth_controller(controller)
-            logging.info("Retrying connection after reset...")
-            checker = RFCOMMBumbleChecker(controller, target_address, False)
-            await checker.setup()
-            try:
-                if checker.device is None:
-                    logging.error("Bluetooth device not initialized")
+    for attempt in range(max_retries + 1):
+        try:
+            if checker.device is None:
+                logging.error("Bluetooth device not initialized")
+                return
+            checker.connection = await checker.device.connect(  # type: ignore[misc]
+                target_address, transport=BT_BR_EDR_TRANSPORT
+            )
+            connected = True
+            break
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            error_str = str(e).lower()
+
+            if "limited_resources" in error_str:
+                if attempt == 0:
+                    logging.warning(
+                        "Connection rejected by remote device - "
+                        "device has too many active connections."
+                    )
+                else:
+                    logging.warning("Retry %d/%d failed.",
+                                    attempt, max_retries)
+
+                if attempt < max_retries:
+                    await checker.close()
+                    reset_usb_bluetooth_controller(controller)
+                    release_bluetooth_controller(controller)
+                    logging.info(
+                        "Waiting %.1f seconds before retry %d/%d...",
+                        retry_delay, attempt + 1, max_retries
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 1.5
+                    checker = RFCOMMBumbleChecker(
+                        controller, target_address, False)
+                    await checker.setup()
+                else:
+                    logging.error(
+                        "All %d retries exhausted. Target device may be busy.",
+                        max_retries
+                    )
+                    await checker.close()
                     return
-                checker.connection = await checker.device.connect(
-                    target_address, transport=BT_BR_EDR_TRANSPORT
-                )
-            except Exception as retry_e:  # pylint: disable=broad-exception-caught
-                logging.error("Retry failed: %s", retry_e)
+
+            elif "page_timeout" in error_str:
+                logging.error("Connection failed: %s", e)
+                logging.info("")
+                logging.info("PAGE TIMEOUT - The device did not respond.")
+                logging.info("Possible causes:")
+                logging.info("  1. Device is out of range (try moving closer)")
+                logging.info("  2. Device is powered off or in sleep mode")
+                logging.info("  3. Device is not in connectable mode")
+                logging.info("  4. Bluetooth address may be incorrect")
+                logging.info("")
+                logging.info(
+                    "Tip: Make sure the target device is awake and nearby.")
                 await checker.close()
                 return
-        elif "authentication" in error_str or "rejected" in error_str:
-            logging.info("Connection was REJECTED by the device.")
-            logging.info(
-                "This may mean the device is PATCHED against CVE-2025-20701.")
-        else:
-            logging.info("Connection could not be established.")
 
-        await checker.close()
+            elif "authentication" in error_str or "rejected" in error_str:
+                logging.error("Connection failed: %s", e)
+                logging.info("")
+                logging.info("Connection was REJECTED by the device.")
+                logging.info(
+                    "This may mean the device is PATCHED against CVE-2025-20701."
+                )
+                await checker.close()
+                return
+
+            else:
+                logging.error("Connection failed: %s", e)
+                logging.info("")
+                logging.info("Connection could not be established.")
+                await checker.close()
+                return
+
+    if not connected:
         return
 
     logging.info("Connected successfully WITHOUT pairing!")
