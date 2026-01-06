@@ -1,5 +1,47 @@
 # RACE Toolkit
 
+> **Note:** This is a fork of the original [auracast-research/race-toolkit](https://github.com/auracast-research/race-toolkit) repository.
+
+## Changes from Original Repository
+
+This fork includes the following improvements over the original codebase:
+
+### USB Bluetooth Controller Reset Functionality
+
+Added robust USB Bluetooth controller management to prevent "device busy" errors:
+
+- **`release_bluetooth_controller()`** - Stops system Bluetooth services (`bluetooth.service`, `bluetoothd`) that may be holding the controller, preventing device conflicts
+- **`reset_usb_bluetooth_controller()`** - Performs a USB device reset using either `USBDEVFS_RESET` ioctl or sysfs fallback to clear stuck connections
+- **`_reset_hci_controller()`** - Resets HCI Bluetooth controllers (for built-in adapters) using `hciconfig`
+- **`enumerate_bluetooth_controllers()`** - Lists all available USB Bluetooth controllers with their VID:PID
+- **`select_bluetooth_controller()`** - Provides automatic or interactive controller selection when multiple are available
+
+### Improved Error Handling in Connection Retries
+
+Enhanced reliability when connecting to Bluetooth devices:
+
+- **Import fix** - Changed `ConnectionError` import to `BumbleConnectionError` to avoid shadowing Python's built-in exception
+- **Connection timeouts** - Added 15-second timeout for BLE connections and 10-second timeout for device scanning to prevent indefinite hangs
+- **Automatic retry with authentication** - When RFCOMM connection fails, automatically retries with authentication enabled
+- **Better error messages** - Improved logging with clearer error messages and suggestions (e.g., suggesting `--transport rfcomm` when BLE fails)
+- **Graceful device scanning** - Device scanning now returns `None` with helpful warnings instead of hanging indefinitely
+
+### Code Quality Improvements
+
+- Added module-level docstring explaining the toolkit's purpose
+- Improved logging format consistency (using `%s` style for better performance)
+- Added proper exception handling for `usb1` library import (graceful fallback when not installed)
+- Fixed duplicate `return False` statements in error paths
+- Better structured helper methods (e.g., `_establish_rfcomm_connection()`)
+
+### Commit History
+
+| Commit | Description |
+|--------|-------------|
+| `cc609a3` | Add USB Bluetooth controller reset functionality and improve error handling in connection retries - Initial changes including all improvements listed above |
+
+---
+
 RACE Toolkit is the tool released alongside our Airoha research. You can find more about that in our [blog post](https://insinuator.net/2025/12/bluetooth-headphone-jacking-full-disclosure-of-airoha-race-vulnerabilities).
 
 This repository contains a Python-based command-line toolkit for interacting with devices that expose the **RACE protocol** over various transports (BLE GATT, Bluetooth Classic RFCOMM, USB HID). It is primarily intended for further security research into the Airoha ecosystem and for end-users to check whether their devices are affected by the vulnerabilities.
