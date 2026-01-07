@@ -1629,8 +1629,17 @@ async def command_sniff(args: argparse.Namespace):
     packet_count = [0]
     start_time = [None]
     running = [True]
+    enum_in_progress = [False]  # Track if enumeration is happening
+    scan_paused_since = [None]  # Track when scanning was paused
     device = None
     t = None
+
+    # Set up signal handler for clean Ctrl+C exit
+    import signal
+
+    def signal_handler(sig, frame):
+        running[0] = False
+    original_handler = signal.signal(signal.SIGINT, signal_handler)
 
     # Manufacturer company IDs
     COMPANIES = {
@@ -1671,8 +1680,11 @@ async def command_sniff(args: argparse.Namespace):
         return ""
 
     def clear_screen():
-        """Clear terminal screen."""
-        print("\033[2J\033[H", end="", flush=True)
+        """Clear terminal screen and reset cursor to top."""
+        # Use both clear screen and move to home, plus clear scrollback
+        import sys
+        sys.stdout.write("\033[2J\033[H\033[3J")
+        sys.stdout.flush()
 
     def move_cursor(row: int, col: int = 1):
         """Move cursor to position."""
@@ -1695,15 +1707,21 @@ async def command_sniff(args: argparse.Namespace):
         print("\033[1;36m" + "=" * width + "\033[0m")
         print()
 
-        # Stats line
+        # Stats line with enumeration/scan status
         mode_str = "\033[1;33mACTIVE\033[0m" if active_scan else "\033[1;32mPASSIVE\033[0m"
-        stats = f"  Mode: {mode_str}  |  Devices: \033[1;33m{len(devices_seen)}\033[0m  |  Packets: \033[1;33m{packet_count[0]}\033[0m  |  Time: \033[1;33m{elapsed:.0f}s\033[0m"
+        if enum_in_progress[0]:
+            status_str = "  |  \033[1;35m⟳ ENUMERATING...\033[0m"
+        elif scan_paused_since[0]:
+            status_str = "  |  \033[1;31m⏸ SCAN PAUSED\033[0m"
+        else:
+            status_str = ""
+        stats = f"  Mode: {mode_str}  |  Devices: \033[1;33m{len(devices_seen)}\033[0m  |  Packets: \033[1;33m{packet_count[0]}\033[0m  |  Time: \033[1;33m{elapsed:.0f}s\033[0m{status_str}"
         print(stats)
         print()
 
-        # Table header
-        header = f"  {'#':<4} {'ADDRESS':<20} {'SIGNAL':<6} {'RSSI':<10} {'NAME':<24} {'VENDOR':<16} {'PKTS':>6}"
-        print("\033[1;37;44m" + header.ljust(width) + "\033[0m")
+        # Table header - fixed width columns
+        header = f"{'#':>3}  {'ADDRESS':<20}  {'RSSI':>7}  {'NAME':<20}  {'VENDOR':<14}  {'PKTS':>5}"
+        print("\033[1;37;44m  " + header + "  \033[0m")
 
         # Sort devices by packet count (most active first)
         sorted_devices = sorted(
@@ -1742,8 +1760,8 @@ async def command_sniff(args: argparse.Namespace):
             if age > 5:
                 color = "\033[2m"  # Dim
 
-            row = f"  {idx:<4} {addr:<20} {bars:<6} {rssi:>4}dBm   {name:<24} {vendor:<16} {pkts:>6}"
-            print(f"{color}{row}\033[0m")
+            row = f"{idx:>3}  {addr:<20}  {rssi:>4}dBm  {name:<20}  {vendor:<14}  {pkts:>5}"
+            print(f"{color}  {row}  \033[0m")
 
         # Fill remaining rows
         for _ in range(max_rows - len(sorted_devices[:max_rows])):
@@ -1831,9 +1849,6 @@ async def command_sniff(args: argparse.Namespace):
 
         start_time[0] = time.time()
 
-        # Enumeration state tracking
-        enum_in_progress = [False]
-
         from bumble.device import Peer
         from bumble.gatt import (
             GATT_DEVICE_NAME_CHARACTERISTIC,
@@ -1866,6 +1881,7 @@ async def command_sniff(args: argparse.Namespace):
             connection = None
             try:
                 # Stop scanning temporarily to connect
+                scan_paused_since[0] = time.time()
                 await device.send_command(
                     HCI_LE_Set_Scan_Enable_Command(
                         le_scan_enable=0, filter_duplicates=0)
@@ -1949,6 +1965,7 @@ async def command_sniff(args: argparse.Namespace):
                         HCI_LE_Set_Scan_Enable_Command(
                             le_scan_enable=1, filter_duplicates=0)
                     )
+                    scan_paused_since[0] = None
                 except Exception:
                     pass
                 enum_in_progress[0] = False
@@ -1984,11 +2001,33 @@ async def command_sniff(args: argparse.Namespace):
             while time.time() < end_time and running[0]:
                 draw_table()
                 await maybe_enumerate_next()
+                # Safety: if scanning has been paused for more than 15 seconds, force resume
+                if scan_paused_since[0] and (time.time() - scan_paused_since[0]) > 15:
+                    try:
+                        await device.send_command(
+                            HCI_LE_Set_Scan_Enable_Command(
+                                le_scan_enable=1, filter_duplicates=0)
+                        )
+                        scan_paused_since[0] = None
+                        enum_in_progress[0] = False
+                    except Exception:
+                        pass
                 await asyncio.sleep(1)
         else:
             while running[0]:
                 draw_table()
                 await maybe_enumerate_next()
+                # Safety: if scanning has been paused for more than 15 seconds, force resume
+                if scan_paused_since[0] and (time.time() - scan_paused_since[0]) > 15:
+                    try:
+                        await device.send_command(
+                            HCI_LE_Set_Scan_Enable_Command(
+                                le_scan_enable=1, filter_duplicates=0)
+                        )
+                        scan_paused_since[0] = None
+                        enum_in_progress[0] = False
+                    except Exception:
+                        pass
                 await asyncio.sleep(1)
 
     except asyncio.CancelledError:
@@ -2001,6 +2040,11 @@ async def command_sniff(args: argparse.Namespace):
         traceback.print_exc()
     finally:
         running[0] = False
+        # Restore original signal handler
+        try:
+            signal.signal(signal.SIGINT, original_handler)
+        except Exception:
+            pass
         try:
             if device:
                 await device.send_command(
@@ -2051,7 +2095,7 @@ async def command_sniff(args: argparse.Namespace):
 
     # Display enriched selection table directly (no second enumeration phase)
     print("\033[1;37;44m" +
-          f"  {'#':<3} {'ADDRESS':<18} {'RSSI':<7} {'NAME':<22} {'TYPE':<12} {'VENDOR':<15} {'SVCS':<4}" + "\033[0m")
+          f"  {'#':<3} {'ADDRESS':<20} {'RSSI':<7} {'NAME':<22} {'TYPE':<12} {'VENDOR':<15} {'SVCS':<4}" + "\033[0m")
     print()
 
     for idx, (addr, info) in enumerate(sorted_devices, 1):
@@ -2078,7 +2122,7 @@ async def command_sniff(args: argparse.Namespace):
         svcs_str = str(services) if services > 0 else "-"
 
         print(
-            f"{color}  {idx:<3} {conn_icon} {addr:<17} {rssi:>4}dBm {name:<22} {device_type:<12} {vendor:<15} {svcs_str:<4}\033[0m")
+            f"{color}  {idx:<3} {conn_icon} {addr:<20} {rssi:>4}dBm {name:<22} {device_type:<12} {vendor:<15} {svcs_str:<4}\033[0m")
 
     print()
     print("\033[1;36m" + "-" * 90 + "\033[0m")
@@ -2117,7 +2161,8 @@ async def command_sniff(args: argparse.Namespace):
             except ValueError:
                 print(f"\n  \033[1;31mInvalid input.\033[0m\n")
     except (EOFError, KeyboardInterrupt):
-        print("\n")
+        print("\n  \033[1;33mExiting...\033[0m\n")
+        return None
 
     return None
 
@@ -2190,6 +2235,84 @@ async def command_ble_info(args: argparse.Namespace):
         "9fa480e0-4967-4542-9390-d343dc5d04ae": ("Apple Nearby", "📱"),
         "7905f431-b5ce-4e99-a40f-4b1e122d00d0": ("Apple Media", "🎵"),
         "d0611e78-bbb4-4591-a5f8-487910ae4366": ("Apple HomeKit", "🏠"),
+    }
+
+    # Well-known characteristic UUIDs with descriptions
+    CHARACTERISTIC_NAMES = {
+        "2a00": ("Device Name", "The user-friendly name of the device"),
+        "2a01": ("Appearance", "Device appearance category (e.g., phone, watch)"),
+        "2a02": ("Peripheral Privacy Flag", "Privacy settings for the device"),
+        "2a03": ("Reconnection Address", "Address for reconnection"),
+        "2a04": ("Peripheral Preferred Connection", "Preferred connection parameters"),
+        "2a05": ("Service Changed", "Indicates GATT database has changed"),
+        "2a19": ("Battery Level", "Current battery percentage (0-100%)"),
+        "2a1a": ("Battery Power State", "Charging/discharging state"),
+        "2a23": ("System ID", "Unique system identifier"),
+        "2a24": ("Model Number", "Device model number string"),
+        "2a25": ("Serial Number", "Device serial number"),
+        "2a26": ("Firmware Revision", "Firmware version string"),
+        "2a27": ("Hardware Revision", "Hardware version string"),
+        "2a28": ("Software Revision", "Software version string"),
+        "2a29": ("Manufacturer Name", "Manufacturer name string"),
+        "2a2a": ("IEEE Regulatory Cert", "Regulatory certification data"),
+        "2a37": ("Heart Rate Measurement", "Current heart rate in BPM"),
+        "2a38": ("Body Sensor Location", "Where sensor is worn"),
+        "2a39": ("Heart Rate Control Point", "Reset energy expended"),
+        "2a4d": ("Report", "HID input/output report data"),
+        "2a4e": ("Protocol Mode", "HID boot/report protocol mode"),
+        "2a4a": ("HID Information", "HID version and country code"),
+        "2a4b": ("Report Map", "HID report descriptor"),
+        "2a4c": ("HID Control Point", "Suspend/exit suspend"),
+        "2a50": ("PnP ID", "Vendor/Product ID information"),
+        "2a6e": ("Temperature", "Temperature measurement"),
+        "2a6f": ("Humidity", "Humidity percentage"),
+        "2a76": ("UV Index", "UV radiation index"),
+        "2a77": ("Irradiance", "Light irradiance value"),
+        "2a78": ("Rainfall", "Rainfall measurement"),
+        "2a79": ("Wind Speed", "Wind speed measurement"),
+        "2aa1": ("Magnetic Flux Density 2D", "Compass data"),
+        "2aa2": ("Magnetic Flux Density 3D", "3D compass data"),
+    }
+
+    # Vendor-specific 128-bit characteristic UUIDs (common ones from various manufacturers)
+    VENDOR_CHARACTERISTICS = {
+        # Nordic Semiconductor UART Service
+        "6e400002-b5a3-f393-e0a9-e50e24dcca9e": ("Nordic UART RX", "Nordic", "Receive data from phone to device"),
+        "6e400003-b5a3-f393-e0a9-e50e24dcca9e": ("Nordic UART TX", "Nordic", "Transmit data from device to phone"),
+        # Texas Instruments SensorTag
+        "f000aa01-0451-4000-b000-000000000000": ("TI Temperature Data", "Texas Instruments", "IR temperature sensor reading"),
+        "f000aa02-0451-4000-b000-000000000000": ("TI Temperature Config", "Texas Instruments", "Temperature sensor configuration"),
+        "f000aa11-0451-4000-b000-000000000000": ("TI Accelerometer Data", "Texas Instruments", "Accelerometer XYZ values"),
+        "f000aa21-0451-4000-b000-000000000000": ("TI Humidity Data", "Texas Instruments", "Humidity sensor reading"),
+        "f000aa31-0451-4000-b000-000000000000": ("TI Magnetometer Data", "Texas Instruments", "Compass/magnetometer reading"),
+        "f000aa41-0451-4000-b000-000000000000": ("TI Barometer Data", "Texas Instruments", "Barometric pressure reading"),
+        "f000aa51-0451-4000-b000-000000000000": ("TI Gyroscope Data", "Texas Instruments", "Gyroscope XYZ values"),
+        # Apple
+        "9b3c81d8-57b1-4a8a-b8df-0e56f7ca51c2": ("Apple Continuity", "Apple", "Continuity/Handoff data"),
+        "69d1d8f3-45e1-49a8-9821-9bbdfdaad9d9": ("Apple Notification Source", "Apple", "iOS notification data"),
+        "9fbf120d-6301-42d9-8c58-25e699a21dbd": ("Apple Control Point", "Apple", "ANCS control point"),
+        "22eac6e9-24d6-4bb5-be44-b36ace7c7bfb": ("Apple Data Source", "Apple", "ANCS data source"),
+        # Bose
+        "f0001131-0451-4000-b000-000000000000": ("Bose Audio Control", "Bose", "Audio control commands"),
+        "f0001132-0451-4000-b000-000000000000": ("Bose Audio Status", "Bose", "Audio status information"),
+        # Fitbit
+        "558dfa00-4fa8-4105-9f02-4eaa93e62980": ("Fitbit Live Data", "Fitbit", "Real-time fitness data"),
+        "558dfa01-4fa8-4105-9f02-4eaa93e62980": ("Fitbit Control", "Fitbit", "Device control commands"),
+        # Xiaomi
+        "0000ff01-0000-1000-8000-00805f9b34fb": ("Xiaomi Activity Data", "Xiaomi", "Steps/activity information"),
+        "0000ff02-0000-1000-8000-00805f9b34fb": ("Xiaomi Control Point", "Xiaomi", "Device control"),
+        "0000ff03-0000-1000-8000-00805f9b34fb": ("Xiaomi User Info", "Xiaomi", "User profile data"),
+        # JBL/Harman
+        "02e19538-b50e-11ea-b3de-0242ac130004": ("JBL Control", "JBL/Harman", "Speaker control commands"),
+        "02e1952a-b50e-11ea-b3de-0242ac130004": ("JBL Status", "JBL/Harman", "Speaker status"),
+        # Sonos
+        "7e846e42-fc81-4e53-8a2a-0d94a9e05f82": ("Sonos Control", "Sonos", "Speaker control"),
+        # Google Fast Pair
+        "fe2c1234-8366-4814-8eb0-01de32100bea": ("Google Fast Pair", "Google", "Fast Pair model ID"),
+        "fe2c1235-8366-4814-8eb0-01de32100bea": ("Google Fast Pair Key", "Google", "Fast Pair key-based pairing"),
+        "fe2c1236-8366-4814-8eb0-01de32100bea": ("Google Fast Pair Passkey", "Google", "Fast Pair passkey"),
+        # Microsoft Swift Pair
+        "0000fef3-0000-1000-8000-00805f9b34fb": ("Microsoft Swift Pair", "Microsoft", "Windows Swift Pair data"),
     }
 
     # Appearance values
@@ -2456,14 +2579,14 @@ async def command_ble_info(args: argparse.Namespace):
         print_header(f"GATT SERVICES ({len(services_found)} found)")
 
         for service_uuid, service_name, service_icon, service in services_found:
-            # Use short UUID if standard
+            # Show full UUID for standard services as 0xXXXX, or full 128-bit for custom
             if service_uuid.startswith("0000") and service_uuid.endswith("-0000-1000-8000-00805f9b34fb"):
-                short_uuid = f"0x{service_uuid[4:8].upper()}"
+                display_uuid = f"0x{service_uuid[4:8].upper()} (Bluetooth SIG Standard)"
             else:
-                short_uuid = service_uuid[:23] + "..."
+                display_uuid = service_uuid
 
             print(f"\n  {service_icon} \033[1;32m{service_name}\033[0m")
-            print(f"     UUID: \033[0;36m{short_uuid}\033[0m")
+            print(f"     UUID: \033[0;36m{display_uuid}\033[0m")
             print(f"     Characteristics: {len(service.characteristics)}")
 
             for char in service.characteristics:
@@ -2486,12 +2609,29 @@ async def command_ble_info(args: argparse.Namespace):
                     props.append("ExtProps")
 
                 char_uuid = str(char.uuid).lower()
-                if char_uuid.startswith("0000") and char_uuid.endswith("-0000-1000-8000-00805f9b34fb"):
-                    short_char_uuid = f"0x{char_uuid[4:8].upper()}"
-                else:
-                    short_char_uuid = char_uuid[:18] + "..."
 
-                print(f"       • {short_char_uuid}: [{', '.join(props)}]")
+                # Look up characteristic name
+                char_name = None
+                char_desc = None
+                if char_uuid.startswith("0000") and char_uuid.endswith("-0000-1000-8000-00805f9b34fb"):
+                    short_id = char_uuid[4:8]
+                    if short_id in CHARACTERISTIC_NAMES:
+                        char_name, char_desc = CHARACTERISTIC_NAMES[short_id]
+                    display_char_uuid = f"0x{short_id.upper()}"
+                else:
+                    display_char_uuid = char_uuid
+
+                if char_name:
+                    print(
+                        f"       • \033[1;33m{char_name}\033[0m ({display_char_uuid})")
+                    print(f"         \033[0;90m{char_desc}\033[0m")
+                    print(f"         Properties: [{', '.join(props)}]")
+                else:
+                    print(
+                        f"       • \033[0;37m{display_char_uuid}\033[0m: [{', '.join(props)}]")
+                    if not char_uuid.startswith("0000"):
+                        print(
+                            f"         \033[0;90mVendor-specific characteristic\033[0m")
 
         # Summary
         print_header("SUMMARY")
@@ -2505,7 +2645,8 @@ async def command_ble_info(args: argparse.Namespace):
                 device_types.append("Input Device (HID)")
             if "Heart Rate" in service_name:
                 device_types.append("Fitness Tracker")
-            if "Watch" in service_name or device_info.get("appearance_name", "").lower().find("watch") >= 0:
+            appearance_name = device_info.get("appearance_name") or ""
+            if "Watch" in service_name or "watch" in appearance_name.lower():
                 device_types.append("Smartwatch")
             if "AirPods" in service_name:
                 device_types.append("Apple AirPods")
