@@ -34,6 +34,10 @@
 - Binary firmware version parsing
 - HCI connection cancel on timeout/retry
 - Enhanced error handling throughout
+- **Unified library usage**:
+  - **Bleak** for active BLE device scanning (better reliability across platforms)
+  - **Bumble** for passive BLE monitoring, GATT connections, and all Classic Bluetooth operations
+  - Consistent approach across all commands for maintainability
 
 ### Documentation Improvements
 

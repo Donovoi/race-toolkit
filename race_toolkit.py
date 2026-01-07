@@ -1059,126 +1059,202 @@ async def command_check(args: argparse.Namespace):
 
     if not skip_ble:
         logging.info("Step 1: Scanning Bluetooth Low Energy devices.")
-        logging.info("Scanning for 5 seconds...")
+        logging.info("Scanning for 10 seconds using Bleak scanner...")
+        logging.info("")
 
-        # Step 1: BLE Checks.
-        # - first check if the device is available via BLE
-        # - then check for UUIDs that we know about
-        # - lasty, connect to the device and try the following
-        #   - read from flash
-        #   - get bdaddr for Classic checks
-        le_checker = GATTBumbleChecker(controller, args.target_address)
-        await le_checker.setup(_noop_recv)
-        scan_res = await le_checker.scan_devices()
-        if scan_res:
-            addr, dev_name = scan_res
-            logging.info(
-                "Your device is %s (%s). Trying to identify RACE UUIDs via GATT.",
-                dev_name, addr
-            )
-            try:
-                uuid_found = await le_checker.check_UUIDs(addr)
-            except asyncio.CancelledError:
-                logging.warning(
-                    "BLE connection was cancelled. The device may have disconnected."
-                )
-                uuid_found = False
-            except (OSError, ConnectionError, BrokenPipeError) as e:
-                logging.warning("BLE connection error: %s", e)
-                uuid_found = False
+        # Use Bleak for better BLE scanning (like the scan command)
+        try:
+            from bleak import BleakScanner
 
-            if uuid_found:
-                _get_vuln(vulnerabilities,
-                          "CVE-2025-20700").status = VulnerabilityStatus.VULNERABLE
+            devices_found = {}
 
-                logging.info(
-                    "Initiating a proper BLE connection to %s on %s.",
-                    dev_name, addr
-                )
-                le_transport = GATTBumbleTransport(controller, addr, [], False)
-                le_transport.connection = le_checker.connection
-                le_transport.device = le_checker.device
-                await le_transport.setup_gatt(_noop_recv)
-                r = RACE(le_transport, args.send_delay)
-                logging.info("Trying to read flash via BLE.")
-                d = RACEFlashDumper(r, 0x08000000, 0x1000)
-                # try to dump with a 10-second timeout
-                status = VulnerabilityStatus.FIXED
-                try:
-                    dump_data = await asyncio.wait_for(d.dump(), 10.0)
-                    # Check if we got valid data or just error responses
-                    if dump_data and _is_valid_dump(dump_data):
-                        status = VulnerabilityStatus.VULNERABLE
-                        collected_dumps["ble_flash"] = dump_data
-                    elif d.had_errors:
-                        logging.warning(
-                            "Flash dump had errors - "
-                            "device may have partial protections"
-                        )
-                    else:
-                        logging.warning(
-                            "Flash dump returned invalid/empty data"
-                        )
-                except asyncio.TimeoutError:
-                    logging.warning(
-                        "Timeout! Unable to dump flash within 10 seconds. "
-                        "Device might be fixed!"
-                    )
-                except (OSError, ConnectionError, BrokenPipeError) as e:
-                    logging.warning(
-                        "Unable to dump flash. Device might be fixed! Error is %s",
-                        e
-                    )
-                _get_vuln(vulnerabilities, "CVE-2025-20702_LE").status = status
+            def on_ble_device(device, adv_data):
+                addr_str = device.address
+                name = device.name or adv_data.local_name or "(unknown)"
+                rssi = adv_data.rssi
 
-                r = RACE(le_transport, args.send_delay)
-                await r.setup()
-                if not bdaddr:
-                    try:
-                        logging.info(
-                            "Trying to obtain the Bluetooth Classic address "
-                            "for next step."
-                        )
-                        await asyncio.wait_for(
-                            r.send_sync(GetEDRAddress()), 8.0
-                        )
-                        bdaddr = GetEDRAddressResponse.unpack(
-                            r.sync_payload).bd_addr
-                        bdaddr = ":".join(f"{byte:02X}" for byte in bdaddr)
-                        logging.info(
-                            "Got Bluetooth Classic address %s", bdaddr
-                        )
-                    except asyncio.TimeoutError:
-                        logging.warning(
-                            "Timeout! Unable to retrieve Bluetooth Classic "
-                            "address within 8 seconds. The RACE command might "
-                            "be unavailable, which is expected for many devices."
-                        )
-                    except (OSError, ConnectionError, BrokenPipeError) as e:
-                        logging.warning("Error receiving BD addr: %s.", e)
+                if addr_str not in devices_found:
+                    devices_found[addr_str] = {
+                        "name": name,
+                        "rssi": rssi,
+                        "device": device
+                    }
+                    logging.info("  Found: %s  %-25s  RSSI: %ddBm",
+                                 addr_str, name[:25], rssi if rssi else 0)
 
-                await le_transport.close()
-                await le_checker.close()
-            else:
-                # uuid_found was False - close the checker and mark as not vulnerable
-                logging.info("No known RACE UUIDs found via GATT.")
+            scanner = BleakScanner(detection_callback=on_ble_device)
+            logging.info("-" * 60)
+            await scanner.start()
+            await asyncio.sleep(10.0)
+            await scanner.stop()
+            logging.info("-" * 60)
+            logging.info("")
+
+            if not devices_found:
+                logging.warning("No BLE devices found.")
                 logging.info("")
+                logging.info("Tips:")
+                logging.info("  - Make sure your device is powered on")
+                logging.info("  - Try moving closer to the device")
                 logging.info(
-                    "BLE Result: Device does not appear to expose RACE via BLE.")
+                    "  - Some devices only advertise when not connected")
                 logging.info(
-                    "  - CVE-2025-20700 (GATT auth bypass): NOT VULNERABLE")
-                logging.info("  - CVE-2025-20702 via BLE: NOT VULNERABLE")
-                await le_checker.close()
-        else:
-            logging.info(
-                "The device does not seem to be available via BLE. "
-                "It is probably not vulnerable to CVE-2025-20700!"
-            )
-            _get_vuln(vulnerabilities,
-                      "CVE-2025-20700").status = VulnerabilityStatus.NOT_APPLICABLE
-            _get_vuln(vulnerabilities,
-                      "CVE-2025-20702_LE").status = VulnerabilityStatus.NOT_APPLICABLE
-            await le_checker.close()
+                    "  - If you know the address, use --target-address directly")
+                logging.info("")
+            else:
+                # Sort by RSSI (strongest signal first)
+                sorted_devices = sorted(
+                    devices_found.items(),
+                    key=lambda x: x[1].get("rssi", -999) or -999,
+                    reverse=True
+                )
+
+                logging.info("Found %d BLE device(s):", len(sorted_devices))
+                logging.info("")
+                for i, (addr, info) in enumerate(sorted_devices):
+                    logging.info("  [%d]: %s (%s) - RSSI: %ddBm",
+                                 i, info["name"], addr, info.get("rssi", 0))
+                logging.info("  [X]: None of these devices is mine")
+                logging.info("")
+
+                chosen = input(
+                    "Which device is yours? Enter number [0-%d] or X: " % (len(sorted_devices) - 1))
+                chosen = chosen.strip()
+
+                addr = None
+                dev_name = None
+
+                if chosen.lower() != "x":
+                    try:
+                        idx = int(chosen)
+                        if 0 <= idx < len(sorted_devices):
+                            addr, info = sorted_devices[idx]
+                            dev_name = info["name"]
+                            logging.info("Selected: %s (%s)", dev_name, addr)
+                        else:
+                            logging.error(
+                                "Invalid selection. Number out of range.")
+                    except ValueError:
+                        logging.error(
+                            "Invalid input. Please enter a number or X.")
+                else:
+                    logging.info("User chose to skip BLE device selection.")
+
+                if addr and dev_name:
+                    logging.info("")
+                    logging.info(
+                        "Connecting to %s (%s) to check for RACE UUIDs...", dev_name, addr)
+
+                    # Now use Bumble to connect and check UUIDs
+                    le_checker = GATTBumbleChecker(controller, addr)
+                    await le_checker.setup(_noop_recv)
+
+                    try:
+                        uuid_found = await le_checker.check_UUIDs(addr)
+                    except asyncio.CancelledError:
+                        logging.warning(
+                            "BLE connection was cancelled. The device may have disconnected."
+                        )
+                        uuid_found = False
+                    except (OSError, ConnectionError, BrokenPipeError) as e:
+                        logging.warning("BLE connection error: %s", e)
+                        uuid_found = False
+
+                    if uuid_found:
+                        _get_vuln(vulnerabilities,
+                                  "CVE-2025-20700").status = VulnerabilityStatus.VULNERABLE
+
+                        logging.info(
+                            "Initiating a proper BLE connection to %s on %s.",
+                            dev_name, addr
+                        )
+                        le_transport = GATTBumbleTransport(
+                            controller, addr, [], False)
+                        le_transport.connection = le_checker.connection
+                        le_transport.device = le_checker.device
+                        await le_transport.setup_gatt(_noop_recv)
+                        r = RACE(le_transport, args.send_delay)
+                        logging.info("Trying to read flash via BLE.")
+                        d = RACEFlashDumper(r, 0x08000000, 0x1000)
+                        # try to dump with a 10-second timeout
+                        status = VulnerabilityStatus.FIXED
+                        try:
+                            dump_data = await asyncio.wait_for(d.dump(), 10.0)
+                            # Check if we got valid data or just error responses
+                            if dump_data and _is_valid_dump(dump_data):
+                                status = VulnerabilityStatus.VULNERABLE
+                                collected_dumps["ble_flash"] = dump_data
+                            elif d.had_errors:
+                                logging.warning(
+                                    "Flash dump had errors - "
+                                    "device may have partial protections"
+                                )
+                            else:
+                                logging.warning(
+                                    "Flash dump returned invalid/empty data"
+                                )
+                        except asyncio.TimeoutError:
+                            logging.warning(
+                                "Timeout! Unable to dump flash within 10 seconds. "
+                                "Device might be fixed!"
+                            )
+                        except (OSError, ConnectionError, BrokenPipeError) as e:
+                            logging.warning(
+                                "Unable to dump flash. Device might be fixed! Error is %s",
+                                e
+                            )
+                        _get_vuln(vulnerabilities,
+                                  "CVE-2025-20702_LE").status = status
+
+                        r = RACE(le_transport, args.send_delay)
+                        await r.setup()
+                        if not bdaddr:
+                            try:
+                                logging.info(
+                                    "Trying to obtain the Bluetooth Classic address "
+                                    "for next step."
+                                )
+                                await asyncio.wait_for(
+                                    r.send_sync(GetEDRAddress()), 8.0
+                                )
+                                bdaddr = GetEDRAddressResponse.unpack(
+                                    r.sync_payload).bd_addr
+                                bdaddr = ":".join(
+                                    f"{byte:02X}" for byte in bdaddr)
+                                logging.info(
+                                    "Got Bluetooth Classic address %s", bdaddr
+                                )
+                            except asyncio.TimeoutError:
+                                logging.warning(
+                                    "Timeout! Unable to retrieve Bluetooth Classic "
+                                    "address within 8 seconds. The RACE command might "
+                                    "be unavailable, which is expected for many devices."
+                                )
+                            except (OSError, ConnectionError, BrokenPipeError) as e:
+                                logging.warning(
+                                    "Error receiving BD addr: %s.", e)
+
+                        await le_transport.close()
+                        await le_checker.close()
+                    else:
+                        # uuid_found was False - close the checker and mark as not vulnerable
+                        logging.info("No known RACE UUIDs found via GATT.")
+                        logging.info("")
+                        logging.info(
+                            "BLE Result: Device does not appear to expose RACE via BLE.")
+                        logging.info(
+                            "  - CVE-2025-20700 (GATT auth bypass): NOT VULNERABLE")
+                        logging.info(
+                            "  - CVE-2025-20702 via BLE: NOT VULNERABLE")
+                        await le_checker.close()
+
+        except ImportError:
+            logging.error(
+                "BLE scanning requires 'bleak' package. Install with: pip install bleak")
+            logging.info("Falling back to skipping BLE checks.")
+        except Exception as e:
+            logging.error("BLE scan failed: %s", e)
+            logging.info("Skipping BLE checks.")
 
     # Ask user if they want to continue with Bluetooth Classic
     logging.info("")

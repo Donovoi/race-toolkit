@@ -272,40 +272,82 @@ class GATTBumbleChecker(BumbleTransport):
             return
 
     async def scan_devices(self):
+        """Scan for BLE devices and let user select their device.
+
+        Uses Bumble's native BLE scanner with enhanced display.
+        """
         device_dict = {}
+        rssi_dict = {}
 
         def on_adv(adv: Advertisement):
             ln = adv.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
+            if not ln:
+                ln = adv.data.get(AdvertisingData.SHORT_LOCAL_NAME)
             if ln:
-                logging.debug(f"Found device {ln} - {adv.address}")
-                device_dict[adv.address] = ln
+                addr_str = str(adv.address)
+                if addr_str not in device_dict:
+                    logging.info(
+                        f"  Found: {addr_str}  {ln:<25}  RSSI: {adv.rssi}dBm")
+                device_dict[addr_str] = ln
+                rssi_dict[addr_str] = adv.rssi
 
         self.device.on("advertisement", on_adv)
 
         # Start scanning and do so for a defined number of seconds
+        logging.info("-" * 60)
         await self.device.start_scanning(True, filter_duplicates=True)
         await asyncio.sleep(self.scan_time)
         self.device.remove_listener("advertisement", on_adv)
         await self.device.stop_scanning()
+        logging.info("-" * 60)
 
         devices = list(device_dict.items())
         if len(devices) > 0:
-            logging.info(f"Found {len(devices)} devices:")
-            for i, (address, name) in enumerate(devices):
-                logging.info(f"[{i}]: {name} ({address})")
-            logging.info("[X]: None of these devices is mine.")
+            # Sort by RSSI (strongest signal first)
+            devices_with_rssi = [(addr, name, rssi_dict.get(addr, -999))
+                                 for addr, name in devices]
+            devices_with_rssi.sort(key=lambda x: x[2], reverse=True)
+
+            logging.info("")
+            logging.info(f"Found {len(devices)} BLE device(s):")
+            logging.info("")
+            for i, (address, name, rssi) in enumerate(devices_with_rssi):
+                logging.info(f"  [{i}]: {name} ({address}) - RSSI: {rssi}dBm")
+            logging.info("  [X]: None of these devices is mine")
+            logging.info("")
 
             chosen = -1
-            logging.info("Which one of these is yours? ")
-            chosen = input("")
+            logging.info(
+                "Which device is yours? Enter number [0-%d] or X: ", len(devices) - 1)
+            chosen = input("").strip()
             if chosen.lower() == "x":
+                logging.info("User chose to skip BLE device selection.")
                 return False
             else:
-                chosen = int(chosen)
-                return devices[chosen]
+                try:
+                    chosen = int(chosen)
+                    if 0 <= chosen < len(devices_with_rssi):
+                        selected = devices_with_rssi[chosen]
+                        logging.info(
+                            f"Selected: {selected[1]} ({selected[0]})")
+                        return (selected[0], selected[1])
+                    else:
+                        logging.error(
+                            "Invalid selection. Number out of range.")
+                        return False
+                except ValueError:
+                    logging.error("Invalid input. Please enter a number or X.")
+                    return False
         else:
-            logging.warning(
-                "No BLE devices found. Try to get closer to your device?")
+            logging.warning("No BLE devices found.")
+            logging.info("")
+            logging.info("Tips:")
+            logging.info("  - Make sure your device is powered on")
+            logging.info("  - Try moving closer to the device")
+            logging.info("  - Some devices only advertise when not connected")
+            logging.info(
+                "  - If you know the address, use --target-address directly")
+            return False
 
     async def check_UUIDs(self, address: str):
         self.address = address
