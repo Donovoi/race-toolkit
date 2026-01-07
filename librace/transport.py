@@ -407,12 +407,18 @@ class GATTBumbleChecker(BumbleTransport):
     async def check_UUIDs(self, address: str):
         self.address = address
 
-        self.connection = await self.device.connect(
-            self.address, transport=BT_LE_TRANSPORT
-        )
+        try:
+            self.connection = await asyncio.wait_for(
+                self.device.connect(self.address, transport=BT_LE_TRANSPORT),
+                timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            logging.error("Connection timed out after 30 seconds.")
+            return False
+
         if not self.connection:
             logging.error("Connection could not be established.")
-            return
+            return False
 
         self.client = Peer(self.connection).gatt_client
 

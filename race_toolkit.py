@@ -1327,13 +1327,20 @@ async def command_check(args: argparse.Namespace):
 
                     if scan_res:
                         addr, dev_name = scan_res
+                        display_name = dev_name if dev_name else "(Unknown)"
                         logging.info("")
                         logging.info("Selected device: %s (%s)",
-                                     dev_name, addr)
+                                     display_name, addr)
                         logging.info("Connecting to check for RACE UUIDs...")
 
                         try:
-                            uuid_found = await le_checker.check_UUIDs(addr)
+                            uuid_found = await asyncio.wait_for(
+                                le_checker.check_UUIDs(addr), timeout=30.0)
+                        except asyncio.TimeoutError:
+                            logging.warning(
+                                "Connection timed out after 30 seconds. Device may be unavailable or out of range."
+                            )
+                            uuid_found = False
                         except asyncio.CancelledError:
                             logging.warning(
                                 "BLE connection was cancelled. The device may have disconnected."
