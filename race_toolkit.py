@@ -845,6 +845,90 @@ def _get_vuln(vulnerabilities: list[Vulnerability], vuln_id: str) -> Vulnerabili
     raise KeyError(f"Vulnerability {vuln_id} not found")
 
 
+def _write_or_display(data: bytes, outfile: str | None, display_func=None):
+    """Write data to file or display it.
+
+    Args:
+        data: Data to output
+        outfile: Output file path, or None to display
+        display_func: Optional function to display data (default: hexdump)
+    """
+    if outfile:
+        with open(outfile, "wb") as f:
+            f.write(data)
+        logging.info("Output saved to %s", outfile)
+    else:
+        if display_func:
+            display_func(data)
+        else:
+            hexdump(data)
+
+
+async def _dump_memory(
+    dumper_class, r: RACE, address: int, size: int,
+    outfile: str | None, debug: bool, alignment: int, unit: str
+) -> None:
+    """Generic memory dump function.
+
+    Args:
+        dumper_class: RACERAMDumper or RACEFlashDumper class
+        r: RACE instance
+        address: Start address
+        size: Size to dump
+        outfile: Optional output file
+        debug: Debug mode (disables progress)
+        alignment: Required alignment for address/size
+        unit: Unit name for error messages
+    """
+    # Validate alignment
+    if size % alignment != 0 or address % alignment != 0:
+        logging.error(
+            "Error! Address and size need to be multiples of %#x to be %s-aligned!",
+            alignment, unit
+        )
+        sys.exit(1)
+
+    dumper = dumper_class(r, address, size, progress=not debug)
+    if outfile:
+        with open(outfile, "wb") as f:
+            await dumper.dump(fd=f)
+        logging.info("Dump saved to %s", outfile)
+    else:
+        outbuf = await dumper.dump()
+        hexdump(outbuf)
+
+
+async def _send_race_command(
+    r: RACE, packet, outfile: str | None,
+    log_request: str = None, log_response: str = None,
+    display_func=None
+) -> bytes:
+    """Send a RACE command and handle output.
+
+    Args:
+        r: RACE instance
+        packet: RACE packet to send
+        outfile: Optional output file
+        log_request: Optional log message before sending
+        log_response: Optional log message after receiving
+        display_func: Optional function to display response
+
+    Returns:
+        Response bytes
+    """
+    if log_request:
+        logging.info(log_request)
+
+    await r.setup()
+    response = await r.send_sync(packet)
+
+    if log_response:
+        logging.info(log_response)
+
+    _write_or_display(response, outfile, display_func)
+    return response
+
+
 def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict = None):
     """Display BLE devices in a table format and let user select one.
 
@@ -1669,54 +1753,39 @@ async def command_check(args: argparse.Namespace):
 
 async def command_ram(r: RACE, address: int, size: int, outfile: str, debug: bool):
     """Dump RAM memory from the target device."""
-    if size % 0x4 != 0:
-        logging.error(
-            "Error! Address needs to be a multiple of 0x4 to be page-aligned!"
-        )
-        sys.exit()
-
-    dumper = RACERAMDumper(r, address, size, progress=not debug)
-    if outfile:
-        with open(outfile, "wb") as f:
-            await dumper.dump(fd=f)
-    else:
-        outbuf = await dumper.dump()
-        hexdump(outbuf)
+    await _dump_memory(
+        RACERAMDumper, r, address, size, outfile, debug,
+        alignment=0x4, unit="word"
+    )
 
 
 async def command_flash(r: RACE, address: int, size: int, outfile: str, debug: bool):
     """Dump flash memory from the target device."""
-    if size % 0x100 != 0 or address % 0x100 != 0:
-        logging.error(
-            "Error! Address and size need to be multiples of 0x100 to be page-aligned!"
-        )
-        sys.exit()
-
-    dumper = RACEFlashDumper(r, address, size, progress=not debug)
-    if outfile:
-        with open(outfile, "wb") as f:
-            await dumper.dump(fd=f)
-    else:
-        outbuf = await dumper.dump()
-        hexdump(outbuf)
+    await _dump_memory(
+        RACEFlashDumper, r, address, size, outfile, debug,
+        alignment=0x100, unit="page"
+    )
 
 
 async def command_link_keys(r: RACE, outfile: str):
     """Retrieve Bluetooth link keys from the target device."""
-    logging.info("Sending get link key request")
-    await r.setup()
-    p = GetLinkKey()
-    res = await r.send_sync(p)
-    pkt = GetLinkKeyResponse.unpack(res)
-    logging.info("Got link key response")
-
-    if outfile:
-        with open(outfile, "wb") as f:
-            f.write(pkt.payload)
-    else:
+    def display_keys(data: bytes):
+        pkt = GetLinkKeyResponse.unpack(data)
         logging.info("Found %d link keys:", pkt.num_of_devices)
         for i, key in enumerate(pkt.link_keys):
             logging.info("%d: %s", i, key.hex())
+
+    response = await _send_race_command(
+        r, GetLinkKey(), outfile,
+        log_request="Sending get link key request",
+        log_response="Got link key response",
+        display_func=display_keys
+    )
+    # If writing to file, write payload only
+    if outfile:
+        pkt = GetLinkKeyResponse.unpack(response)
+        with open(outfile, "wb") as f:
+            f.write(pkt.payload)
 
 
 async def command_bdaddr(r: RACE, outfile: str):
@@ -5861,55 +5930,40 @@ async def command_enumerate_race(r: RACE):
 
 async def command_raw(r: RACE, cmd_id: int, outfile: str):
     """Send a raw RACE command with the specified ID."""
-    logging.info("Sending raw RACE command")
-    await r.setup()
     race_header = RaceHeader(
         head=0x5, type_=RaceType.CMD_EXPECTS_RESPONSE, id_=cmd_id)
-    p = RacePacket(race_header)
-    res = await r.send_sync(p)
 
-    logging.info("Got response")
-
-    if outfile:
-        with open(outfile, "wb") as f:
-            f.write(res)
-    else:
-        hexdump(res)
+    await _send_race_command(
+        r, RacePacket(race_header), outfile,
+        log_request="Sending raw RACE command",
+        log_response="Got response"
+    )
 
 
 async def command_sdkinfo(r: RACE, outfile: str):
     """Retrieve SDK information from the target device."""
-    logging.info("Sending get SDK info request")
-    await r.setup()
-    p = GetSDKInfo()
-    res = await r.send_sync(p)
-    logging.info("Got SDK info response")
+    def display_info(data: bytes):
+        logging.info(data[7:].decode("utf8"))
 
-    if outfile:
-        with open(outfile, "wb") as f:
-            f.write(res)
-    else:
-        logging.info(res[7:].decode("utf8"))
-
-
-async def _get_buildversion(r: RACE):
-    """Retrieve build version from the target device."""
-    await r.setup()
-    p = BuildVersion()
-    return await r.send_sync(p)
+    await _send_race_command(
+        r, GetSDKInfo(), outfile,
+        log_request="Sending get SDK info request",
+        log_response="Got SDK info response",
+        display_func=display_info
+    )
 
 
 async def command_buildversion(r: RACE, outfile: str):
     """Retrieve and display build version from the target device."""
-    logging.info("Sending get build version request")
-    res = await _get_buildversion(r)
-    logging.info("Got build version response")
+    def display_version(data: bytes):
+        logging.info(data[7:].decode("utf8"))
 
-    if outfile:
-        with open(outfile, "wb") as f:
-            f.write(res)
-    else:
-        logging.info(res[7:].decode("utf8"))
+    await _send_race_command(
+        r, BuildVersion(), outfile,
+        log_request="Sending get build version request",
+        log_response="Got build version response",
+        display_func=display_version
+    )
 
 
 async def _read_media_attr(d: RACEDumper, addr: int) -> str:
@@ -6014,10 +6068,12 @@ async def command_dump_partition(r: RACE, outfile: str):
     ptaddr, ptsize, _ = partitions[chosen]
     logging.info("Dumping partition %d at 0x%08X", chosen, ptaddr)
 
+    # Use helper for consistent output handling
     dumper = RACEFlashDumper(r, ptaddr, ptsize)
     if outfile:
         with open(outfile, "wb") as f:
             await dumper.dump(fd=f)
+        logging.info("Partition dump saved to %s", outfile)
     else:
         outbuf = await dumper.dump()
         hexdump(outbuf)
