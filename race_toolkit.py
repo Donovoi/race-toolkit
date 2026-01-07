@@ -722,8 +722,8 @@ def parse_args():
     ble_info_parser.add_argument(
         "--timeout",
         type=float,
-        default=30.0,
-        help="Connection timeout in seconds (default: 30)"
+        default=10.0,
+        help="Connection timeout in seconds (default: 10)"
     )
 
     # BLE Speaker Control PoC (Experimental)
@@ -751,8 +751,8 @@ def parse_args():
     ble_speaker_parser.add_argument(
         "--timeout",
         type=float,
-        default=30.0,
-        help="Connection timeout in seconds (default: 30)"
+        default=10.0,
+        help="Connection timeout in seconds (default: 10)"
     )
 
     # AVRCP Classic Bluetooth Media Control (Experimental)
@@ -782,8 +782,8 @@ def parse_args():
     avrcp_parser.add_argument(
         "--timeout",
         type=float,
-        default=30.0,
-        help="Connection timeout in seconds (default: 30)"
+        default=10.0,
+        help="Connection timeout in seconds (default: 10)"
     )
 
     return parser.parse_args()
