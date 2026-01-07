@@ -58,6 +58,80 @@ from librace.dumper import (
 from librace.util import setup_logging
 from librace.parttable import parse_partition_table
 
+# Rich library for beautiful table formatting
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
+
+# Global console instance for rich output
+_console = Console()
+
+
+def create_table(columns: list, title: str = None, box_style=None) -> Table:
+    """Create a rich Table with consistent styling.
+
+    Args:
+        columns: List of column definitions. Each can be:
+            - str: Column name (uses defaults)
+            - dict: {"name": str, "justify": str, "width": int, "style": str}
+        title: Optional table title
+        box_style: Box style (None for no box, or rich.box constant)
+
+    Returns:
+        Configured rich.table.Table instance
+    """
+    table = Table(
+        show_header=True,
+        header_style="bold white on blue",
+        box=box_style,
+        padding=(0, 1),
+        title=title,
+        title_style="bold cyan" if title else None,
+    )
+
+    for col in columns:
+        if isinstance(col, str):
+            table.add_column(col)
+        else:
+            table.add_column(
+                col.get("name", ""),
+                justify=col.get("justify", "left"),
+                width=col.get("width"),
+                style=col.get("style"),
+                no_wrap=col.get("no_wrap", False),
+            )
+
+    return table
+
+
+def get_rssi_style(rssi: int, stale: bool = False) -> str:
+    """Get rich style string based on RSSI signal strength.
+
+    Args:
+        rssi: Signal strength in dBm
+        stale: If True, returns dim style regardless of RSSI
+
+    Returns:
+        Rich style string
+    """
+    if stale:
+        return "dim"
+    elif rssi >= -50:
+        return "bold green"
+    elif rssi >= -60:
+        return "bright_green"
+    elif rssi >= -70:
+        return "yellow"
+    elif rssi >= -80:
+        return "red"
+    else:
+        return "bright_black"
+
+
+def print_table(table: Table):
+    """Print a table using the global console."""
+    _console.print(table)
+
 
 def release_bluetooth_controller(controller: str):
     """Force stop any existing processes holding onto the Bluetooth controller.
@@ -946,30 +1020,35 @@ def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict = None):
     # Sort by RSSI (strongest signal first)
     devices_with_rssi.sort(key=lambda x: x[2], reverse=True)
 
-    # Print table header
-    print(f"\n\033[1;36m{'─' * 80}\033[0m")
-    print(f"\033[1;36m  FOUND {len(devices_with_rssi)} BLE DEVICE(S)\033[0m")
-    print(f"\033[1;36m{'─' * 80}\033[0m\n")
+    # Create table using rich
+    print()
+    table = create_table([
+        {"name": "#", "justify": "right", "width": 4, "style": "cyan"},
+        {"name": "NAME", "width": 35},
+        {"name": "ADDRESS", "width": 20},
+        {"name": "RSSI", "justify": "right", "width": 8},
+    ], title=f"FOUND {len(devices_with_rssi)} BLE DEVICE(S)")
 
-    # Column headers
-    print(f"  {'#':<4} {'NAME':<35} {'ADDRESS':<20} {'RSSI':>6}")
-    print(f"  {'-'*4} {'-'*35} {'-'*20} {'-'*6}")
-
-    # Print devices
+    # Add devices to table
     for i, (address, name, rssi) in enumerate(devices_with_rssi):
-        # Show "(Unknown)" for devices without names
         display_name = name if name and name != "(unknown)" else "(Unknown)"
-        # Truncate long names
         if len(display_name) > 34:
             display_name = display_name[:31] + "..."
 
-        rssi_color = "\033[1;32m" if rssi > - \
-            70 else "\033[0;33m" if rssi > -85 else "\033[0;90m"
-        print(
-            f"  \033[1;36m[{i}]\033[0m  {display_name:<35} {address:<20} {rssi_color}{rssi:>4}dBm\033[0m")
+        style = get_rssi_style(rssi)
+        table.add_row(
+            f"[{i}]",
+            display_name,
+            address,
+            f"{rssi}dBm" if rssi > -999 else "-",
+            style=style
+        )
 
-    print(f"  \033[1;36m[X]\033[0m  None of these devices is mine")
-    print(f"\n\033[1;36m{'─' * 80}\033[0m\n")
+    # Add cancel option
+    table.add_row("[X]", "None of these devices is mine", "", "", style="dim")
+
+    print_table(table)
+    print()
 
     # Get user selection
     chosen = input(
@@ -2212,15 +2291,42 @@ async def command_ble_scan(args: argparse.Namespace):
     def get_manufacturer(data: AdvertisingData) -> str:
         """Extract manufacturer from advertising data."""
         mfr_data = data.get(AdvertisingData.MANUFACTURER_SPECIFIC_DATA)
-        if mfr_data and isinstance(mfr_data, bytes) and len(mfr_data) >= 2:
-            company_id = struct.unpack('<H', mfr_data[:2])[0]
-            return COMPANIES.get(company_id, f"0x{company_id:04X}")
+        if mfr_data:
+            # Bumble may return tuple (company_id, data) or raw bytes
+            if isinstance(mfr_data, tuple) and len(mfr_data) >= 1:
+                company_id = mfr_data[0]
+                return COMPANIES.get(company_id, f"0x{company_id:04X}")
+            elif isinstance(mfr_data, bytes) and len(mfr_data) >= 2:
+                company_id = struct.unpack('<H', mfr_data[:2])[0]
+                return COMPANIES.get(company_id, f"0x{company_id:04X}")
         return ""
 
-    def parse_apple_continuity(mfr_data: bytes) -> dict:
+    def normalize_mfr_data(mfr_data):
+        """Normalize manufacturer data to (company_id, payload_bytes) tuple.
+
+        Bumble may return either:
+        - tuple: (company_id, data_bytes)
+        - bytes: raw bytes with company_id as first 2 bytes (little-endian)
+
+        Returns (company_id, payload_bytes) or (None, None) if invalid.
+        """
+        if not mfr_data:
+            return None, None
+
+        if isinstance(mfr_data, tuple) and len(mfr_data) >= 2:
+            # Bumble tuple format: (company_id, data)
+            return mfr_data[0], mfr_data[1] if isinstance(mfr_data[1], bytes) else bytes()
+        elif isinstance(mfr_data, bytes) and len(mfr_data) >= 2:
+            # Raw bytes format: company_id (2 bytes LE) + payload
+            company_id = struct.unpack('<H', mfr_data[:2])[0]
+            return company_id, mfr_data[2:]
+
+        return None, None
+
+    def parse_apple_continuity(mfr_data) -> dict:
         """Parse Apple Continuity protocol from manufacturer data.
 
-        Apple uses Company ID 0x004C. After the 2-byte company ID:
+        Apple uses Company ID 0x004C. Message format:
         - Byte 0: Message type
         - Byte 1: Message length
         - Bytes 2+: Message data
@@ -2228,49 +2334,53 @@ async def command_ble_scan(args: argparse.Namespace):
         Returns dict with parsed data or empty dict if not Apple or parse fails.
         """
         result = {}
-        if not mfr_data or len(mfr_data) < 4:
+
+        company_id, payload = normalize_mfr_data(mfr_data)
+        if company_id is None or company_id != 0x004C:  # Apple
             return result
 
-        company_id = struct.unpack('<H', mfr_data[:2])[0]
-        if company_id != 0x004C:  # Apple
+        if not payload or len(payload) < 2:
             return result
 
-        msg_type = mfr_data[2]
-        msg_len = mfr_data[3]
+        msg_type = payload[0]
+        msg_len = payload[1]
 
         result["type"] = APPLE_CONTINUITY_TYPES.get(
             msg_type, f"Unknown (0x{msg_type:02X})")
         result["type_code"] = msg_type
 
         # Validate message length
-        if msg_len + 4 > len(mfr_data):
-            result["error"] = f"Invalid length: expected {msg_len}, available {len(mfr_data)-4}"
+        if msg_len + 2 > len(payload):
+            result["error"] = f"Invalid length: expected {msg_len}, available {len(payload)-2}"
             return result
 
         try:
+            # Message data starts at payload[2] (after type and length bytes)
+            msg_data = payload[2:]
+
             if msg_type == 0x02:  # iBeacon
-                if msg_len >= 21:
-                    uuid_bytes = mfr_data[4:20]
+                if msg_len >= 21 and len(msg_data) >= 21:
+                    uuid_bytes = msg_data[0:16]
                     result["ibeacon"] = {
                         "uuid": uuid_bytes.hex(),
-                        "major": struct.unpack('>H', mfr_data[20:22])[0],
-                        "minor": struct.unpack('>H', mfr_data[22:24])[0],
-                        "tx_power": struct.unpack('b', mfr_data[24:25])[0] if len(mfr_data) > 24 else None
+                        "major": struct.unpack('>H', msg_data[16:18])[0],
+                        "minor": struct.unpack('>H', msg_data[18:20])[0],
+                        "tx_power": struct.unpack('b', msg_data[20:21])[0] if len(msg_data) > 20 else None
                     }
                     result["is_tracker"] = True
                     result["tracker_type"] = "iBeacon"
 
             elif msg_type == 0x09:  # AirPlay Target
-                if len(mfr_data) >= 8:
-                    # Last 4 bytes are IP address
-                    ip_bytes = mfr_data[-4:]
+                if len(payload) >= 6:
+                    # Last 4 bytes of payload are IP address
+                    ip_bytes = payload[-4:]
                     result["airplay_ip"] = f"{ip_bytes[0]}.{ip_bytes[1]}.{ip_bytes[2]}.{ip_bytes[3]}"
 
             elif msg_type == 0x10:  # Nearby Info
-                if msg_len >= 2:
-                    flags = mfr_data[4] >> 4
-                    action_code = mfr_data[4] & 0x0F
-                    status = mfr_data[5] if len(mfr_data) > 5 else 0
+                if msg_len >= 2 and len(msg_data) >= 2:
+                    flags = msg_data[0] >> 4
+                    action_code = msg_data[0] & 0x0F
+                    status = msg_data[1] if len(msg_data) > 1 else 0
 
                     result["nearby_info"] = {
                         "action": APPLE_NEARBY_ACTION_CODES.get(action_code, f"0x{action_code:02X}"),
@@ -2284,15 +2394,15 @@ async def command_ble_scan(args: argparse.Namespace):
                     }
 
             elif msg_type == 0x0F:  # Nearby Action
-                if msg_len >= 2:
-                    action_type = mfr_data[5] if len(mfr_data) > 5 else 0
+                if msg_len >= 2 and len(msg_data) >= 2:
+                    action_type = msg_data[1] if len(msg_data) > 1 else 0
                     result["nearby_action"] = {
                         "type": APPLE_NEARBY_ACTION_TYPES.get(action_type, f"0x{action_type:02X}")
                     }
 
             elif msg_type == 0x12:  # FindMy / AirTag
-                if len(mfr_data) > 4:
-                    status = mfr_data[4]
+                if len(msg_data) >= 1:
+                    status = msg_data[0]
                     maintained = bool((status >> 2) & 0x1)
                     result["findmy"] = {
                         "maintained": maintained,
@@ -2319,9 +2429,9 @@ async def command_ble_scan(args: argparse.Namespace):
 
         # Check manufacturer data for Apple trackers
         mfr_data = data.get(AdvertisingData.MANUFACTURER_SPECIFIC_DATA)
-        if mfr_data and len(mfr_data) >= 2:
-            company_id = struct.unpack('<H', mfr_data[:2])[0]
+        company_id, payload = normalize_mfr_data(mfr_data)
 
+        if company_id is not None:
             # Parse Apple Continuity for FindMy/iBeacon
             if company_id == 0x004C:
                 apple_data = parse_apple_continuity(mfr_data)
@@ -2359,8 +2469,9 @@ async def command_ble_scan(args: argparse.Namespace):
 
         # Get manufacturer data
         mfr_data = data.get(AdvertisingData.MANUFACTURER_SPECIFIC_DATA)
-        if mfr_data and len(mfr_data) >= 2:
-            company_id = struct.unpack('<H', mfr_data[:2])[0]
+        company_id, payload = normalize_mfr_data(mfr_data)
+
+        if company_id is not None:
             details["company_id"] = f"0x{company_id:04X}"
             details["company"] = COMPANIES.get(company_id, "Unknown")
 
@@ -2441,16 +2552,15 @@ async def command_ble_scan(args: argparse.Namespace):
         print(stats)
         print()
 
-        # Table header - fixed width columns (added INFO column)
-        header = f"{'#':>3}  {'ADDRESS':<20}  {'RSSI':>7}  {'NAME':<20}  {'VENDOR':<14}  {'INFO':<8}"
+        # Table header - fixed column widths
+        W_NUM, W_ADDR, W_RSSI, W_NAME, W_VENDOR, W_INFO = 3, 20, 7, 20, 14, 8
+        header = f"{'#':>{W_NUM}}  {'ADDRESS':<{W_ADDR}}  {'RSSI':>{W_RSSI}}  {'NAME':<{W_NAME}}  {'VENDOR':<{W_VENDOR}}  {'INFO':<{W_INFO}}"
         print("\033[1;37;44m  " + header + "  \033[0m")
 
-        # Sort devices - trackers first, then by packet count
+        # Sort devices by RSSI descending, then by address
         sorted_devices = sorted(
             devices_seen.items(),
-            key=lambda x: (1 if x[1].get("tracker")
-                           else 0, x[1].get("count", 0)),
-            reverse=True
+            key=lambda x: (-x[1].get("rssi", -999), x[0])
         )
 
         # Calculate how many rows we can show (minimum 10)
@@ -2460,23 +2570,27 @@ async def command_ble_scan(args: argparse.Namespace):
         # Display devices
         for idx, (addr, info) in enumerate(sorted_devices[:max_rows], 1):
             rssi = info.get("rssi", -99)
-            name = info.get("name", "(unknown)")[:20]
-            vendor = info.get("vendor", "")[:14]
+            raw_name = info.get("name") or ""
+            raw_vendor = info.get("vendor") or ""
             pkts = info.get("count", 0)
-            bars = get_signal_bars(rssi)
             last_seen = info.get("last_seen", 0)
             age = time.time() - last_seen if last_seen else 999
             tracker = info.get("tracker")
+
+            # Pad/truncate each field to exact width
+            name_str = (raw_name or "(unknown)")[:W_NAME].ljust(W_NAME)
+            vendor_str = raw_vendor[:W_VENDOR].ljust(W_VENDOR)
 
             # Info column - show tracker type or packet count
             if tracker:
                 info_str = f"⚠{tracker.get('tracker_type', 'TRACK')[:6]}"
             else:
                 info_str = f"{pkts:>5}pk"
+            info_str = info_str[:W_INFO].ljust(W_INFO)
 
-            # Color code - trackers in red, otherwise by signal strength
-            if tracker:
-                color = "\033[1;31m"  # Red for trackers
+            # Color code by signal strength
+            if age > 30:
+                color = "\033[2m"  # Dim for devices not seen in 30s
             elif rssi >= -50:
                 color = "\033[1;32m"  # Green - excellent
             elif rssi >= -60:
@@ -2488,11 +2602,8 @@ async def command_ble_scan(args: argparse.Namespace):
             else:
                 color = "\033[1;90m"  # Gray - very weak
 
-            # Dim if not seen recently (but not trackers)
-            if age > 5 and not tracker:
-                color = "\033[2m"  # Dim
-
-            row = f"{idx:>3}  {addr:<20}  {rssi:>4}dBm  {name:<20}  {vendor:<14}  {info_str:<8}"
+            # Build row with explicit field widths
+            row = f"{idx:>{W_NUM}}  {addr:<{W_ADDR}}  {rssi:>{W_RSSI-3}}dBm  {name_str}  {vendor_str}  {info_str}"
             print(f"{color}  {row}  \033[0m")
 
         # Fill remaining rows
@@ -2502,7 +2613,13 @@ async def command_ble_scan(args: argparse.Namespace):
         # Footer
         print()
         print("\033[1;36m" + "-" * width + "\033[0m")
-        print("  \033[1;33mPress Ctrl+C to stop and select a device\033[0m")
+        print("  \033[1;4mSignal:\033[0m  "
+              "\033[1;32m■\033[0m >-50  "
+              "\033[1;92m■\033[0m >-60  "
+              "\033[1;33m■\033[0m >-70  "
+              "\033[1;31m■\033[0m >-80  "
+              "\033[1;90m■\033[0m <-80 dBm   "
+              "\033[1;33mPress Ctrl+C to stop\033[0m")
         print("\033[1;36m" + "-" * width + "\033[0m")
 
         # Ensure output is flushed
@@ -2847,17 +2964,14 @@ async def command_ble_scan(args: argparse.Namespace):
         print(
             f"  \033[1;31m⚠ TRACKERS DETECTED: {tracker_count} potential tracking device(s)\033[0m\n")
 
-    # Sort by connectable + name + RSSI for final display
+    # Sort by RSSI descending, then by address for stable ordering
     def sort_key(item):
         addr, info = item
-        has_name = 1 if info.get("name") and info["name"] != "(unknown)" else 0
-        connectable = 1 if info.get("connectable") else 0
-        # Show trackers prominently
-        is_tracker = 1 if info.get("tracker") else 0
         rssi = info.get("rssi", -999)
-        return (is_tracker, connectable, has_name, rssi)
+        # Return (rssi, addr) - rssi descending (negate), addr ascending
+        return (-rssi, addr)
 
-    sorted_devices = sorted(devices_seen.items(), key=sort_key, reverse=True)
+    sorted_devices = sorted(devices_seen.items(), key=sort_key)
 
     # Count enumeration results
     connectable_count = sum(
@@ -2868,51 +2982,73 @@ async def command_ble_scan(args: argparse.Namespace):
     print(
         f"  \033[1;36mDevices discovered:\033[0m {len(devices_seen)} total, {named_count} named, {connectable_count} connectable\n")
 
-    # Display enriched selection table directly (no second enumeration phase)
-    print("\033[1;37;44m" +
-          f"  {'#':<3} {'ADDRESS':<20} {'RSSI':<7} {'NAME':<22} {'TYPE':<12} {'VENDOR':<15} {'INFO':<8}" + "\033[0m")
-    print()
+    # Create table using helper function
+    table = create_table([
+        {"name": "#", "justify": "right", "style": "dim", "width": 3},
+        {"name": "ADDRESS", "width": 22},
+        {"name": "RSSI", "justify": "right", "width": 8},
+        {"name": "NAME", "width": 22},
+        {"name": "TYPE", "width": 14},
+        {"name": "VENDOR", "width": 10},
+        {"name": "INFO", "width": 8},
+    ])
 
+    # Add rows
     for idx, (addr, info) in enumerate(sorted_devices, 1):
         rssi = info.get("rssi", -99)
-        name = info.get("name", "(unknown)")[:22]
-        vendor = info.get("vendor", "")[:15]
-        device_type = info.get("device_type", "")[:12]
+        raw_name = info.get("name") or ""
+        raw_vendor = info.get("vendor") or ""
         services = info.get("services_count", 0)
         connectable = info.get("connectable", False)
         tracker = info.get("tracker")
 
-        # Determine info column content
+        # Get style using helper
+        style = get_rssi_style(rssi)
+
+        # Connection indicator
+        if connectable:
+            conn_icon = "[green]●[/green]"
+        elif tracker:
+            conn_icon = "[yellow]⚠[/yellow]"
+        else:
+            conn_icon = "[bright_black]○[/bright_black]"
+
+        # TYPE column
         if tracker:
-            info_str = f"🔴{tracker.get('tracker_type', 'TRACKER')[:6]}"
+            device_type = tracker.get('tracker_type', 'Tracker')
+        else:
+            device_type = info.get("device_type") or ""
+
+        # INFO column
+        if tracker:
+            info_str = tracker.get('tracker_type', 'TRACKER')[:8]
         elif services > 0:
             info_str = f"{services} svcs"
         else:
             info_str = "-"
 
-        # Color based on tracker/connectivity and signal
-        if tracker:
-            color = "\033[1;31m"  # Red for trackers
-        elif connectable:
-            if rssi >= -60:
-                color = "\033[1;32m"  # Green - connectable, strong
-            elif rssi >= -80:
-                color = "\033[1;33m"  # Yellow - connectable, medium
-            else:
-                color = "\033[0;33m"  # Dim yellow - connectable, weak
-        else:
-            color = "\033[1;90m"  # Gray - not connectable
+        table.add_row(
+            str(idx),
+            f"{conn_icon} {addr}",
+            f"{rssi}dBm",
+            raw_name or "(unknown)",
+            device_type,
+            raw_vendor,
+            info_str,
+            style=style
+        )
 
-        # Connection indicator
-        conn_icon = "●" if connectable else ("⚠" if tracker else "○")
-
-        print(
-            f"{color}  {idx:<3} {conn_icon} {addr:<20} {rssi:>4}dBm {name:<22} {device_type:<12} {vendor:<15} {info_str:<8}\033[0m")
-
+    print_table(table)
     print()
-    print("\033[1;36m" + "-" * 95 + "\033[0m")
     print(
-        "  \033[1;32m●\033[0m = Connectable    \033[1;90m○\033[0m = Not connectable    \033[1;31m⚠\033[0m = Potential Tracker")
+        "  \033[1;32m●\033[0m = Connectable    \033[1;90m○\033[0m = Not connectable    \033[1;33m⚠\033[0m = Potential Tracker")
+    print()
+    print("  \033[1;4mSignal Strength:\033[0m  "
+          "\033[1;32m■\033[0m >-50dBm  "
+          "\033[1;92m■\033[0m >-60dBm  "
+          "\033[1;33m■\033[0m >-70dBm  "
+          "\033[1;31m■\033[0m >-80dBm  "
+          "\033[1;90m■\033[0m <-80dBm")
 
     # Device selection
     try:

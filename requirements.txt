@@ -3,3 +3,4 @@ tqdm
 hid==1.0.7
 bleak
 hexdump
+rich
