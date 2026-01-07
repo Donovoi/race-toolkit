@@ -677,41 +677,36 @@ def parse_args():
         help="Use extended inquiry for more device info"
     )
 
-    # Sniff subcommand - passive BLE listening
-    sniff_parser = subparsers.add_parser(
-        "sniff",
-        help="Passive BLE monitoring - continuous advertisement capture (research tool)"
+    # BLE Scan subcommand - active BLE scanning
+    ble_scan_parser = subparsers.add_parser(
+        "ble-scan",
+        help="BLE scanning - continuous advertisement capture with device enumeration"
     )
-    sniff_parser.add_argument(
+    ble_scan_parser.add_argument(
         "--timeout",
         type=float,
         default=0,
-        help="Sniff duration in seconds (0 = continuous, Ctrl+C to stop)"
+        help="Scan duration in seconds (0 = continuous, Ctrl+C to stop)"
     )
-    sniff_parser.add_argument(
+    ble_scan_parser.add_argument(
         "--filter",
         type=str,
         help="Filter by device name (substring match)"
     )
-    sniff_parser.add_argument(
+    ble_scan_parser.add_argument(
         "--filter-addr",
         type=str,
         help="Filter by MAC address (prefix match)"
     )
-    sniff_parser.add_argument(
+    ble_scan_parser.add_argument(
         "--show-raw",
         action="store_true",
         help="Show raw advertisement data bytes"
     )
-    sniff_parser.add_argument(
+    ble_scan_parser.add_argument(
         "--show-uuids",
         action="store_true",
         help="Show advertised service UUIDs"
-    )
-    sniff_parser.add_argument(
-        "--active",
-        action="store_true",
-        help="Use active scanning (sends scan requests to get device names)"
     )
 
     # BLE Info subcommand - enumerate BLE device information
@@ -1999,14 +1994,11 @@ async def command_scan(args: argparse.Namespace):
             "  - If you know the address, use --target-address directly")
 
 
-async def command_sniff(args: argparse.Namespace):
-    """Passive BLE advertisement sniffing with live table display.
+async def command_ble_scan(args: argparse.Namespace):
+    """BLE scanning with live table display and device enumeration.
 
-    This is TRULY passive - we only listen for BLE advertisements without
-    sending any packets. Similar to what nRF Connect app does.
-
-    Note: For Bluetooth Classic, passive sniffing requires specialized
-    hardware like Ubertooth One due to frequency hopping.
+    Uses active scanning to discover BLE devices and enumerate their
+    services. Similar to what nRF Connect app does.
     """
     from bumble.device import Device, DeviceConfiguration
     from bumble.transport import open_transport_or_link
@@ -2024,7 +2016,6 @@ async def command_sniff(args: argparse.Namespace):
     addr_filter = getattr(args, 'filter_addr', None)
     show_raw = getattr(args, 'show_raw', False)
     show_uuids = getattr(args, 'show_uuids', False)
-    active_scan = getattr(args, 'active', False)
 
     # Release Bluetooth controller
     release_bluetooth_controller(controller)
@@ -2105,21 +2096,20 @@ async def command_sniff(args: argparse.Namespace):
         # Header
         elapsed = time.time() - start_time[0] if start_time[0] else 0
         print("\033[1;36m" + "=" * width + "\033[0m")
-        title = "  BLE ACTIVE SNIFFER  " if active_scan else "  BLE PASSIVE SNIFFER  "
+        title = "  BLE SCANNER  "
         padding = (width - len(title)) // 2
         print("\033[1;36m" + " " * padding + title + " " * padding + "\033[0m")
         print("\033[1;36m" + "=" * width + "\033[0m")
         print()
 
         # Stats line with enumeration/scan status
-        mode_str = "\033[1;33mACTIVE\033[0m" if active_scan else "\033[1;32mPASSIVE\033[0m"
         if enum_in_progress[0]:
             status_str = "  |  \033[1;35m⟳ ENUMERATING...\033[0m"
         elif scan_paused_since[0]:
             status_str = "  |  \033[1;31m⏸ SCAN PAUSED\033[0m"
         else:
             status_str = ""
-        stats = f"  Mode: {mode_str}  |  Devices: \033[1;33m{len(devices_seen)}\033[0m  |  Packets: \033[1;33m{packet_count[0]}\033[0m  |  Time: \033[1;33m{elapsed:.0f}s\033[0m{status_str}"
+        stats = f"  Devices: \033[1;33m{len(devices_seen)}\033[0m  |  Packets: \033[1;33m{packet_count[0]}\033[0m  |  Time: \033[1;33m{elapsed:.0f}s\033[0m{status_str}"
         print(stats)
         print()
 
@@ -2177,6 +2167,10 @@ async def command_sniff(args: argparse.Namespace):
         print("  \033[1;33mPress Ctrl+C to stop and select a device\033[0m")
         print("\033[1;36m" + "-" * width + "\033[0m")
 
+        # Ensure output is flushed
+        import sys
+        sys.stdout.flush()
+
     def on_advertisement(advertisement):
         """Handle incoming BLE advertisement."""
         packet_count[0] += 1
@@ -2206,33 +2200,50 @@ async def command_sniff(args: argparse.Namespace):
             if not name or name_filter.lower() not in name.lower():
                 return
 
-        # Update or add device
+        # Update or add device - preserve existing fields from enumeration
         existing = devices_seen.get(addr_str, {})
-        devices_seen[addr_str] = {
-            "name": name or existing.get("name") or "(unknown)",
-            "rssi": rssi,
-            "vendor": vendor or existing.get("vendor", ""),
-            "last_seen": time.time(),
-            "count": existing.get("count", 0) + 1,
-            "raw_data": advertisement.data if show_raw else None,
-        }
+
+        # Only update name if we got a better one (not "(unknown)")
+        new_name = name if name else existing.get("name", "(unknown)")
+
+        # Only update vendor if we got a new one
+        new_vendor = vendor if vendor else existing.get("vendor", "")
+
+        # Update the dict in place to preserve enumeration data
+        if addr_str in devices_seen:
+            devices_seen[addr_str]["rssi"] = rssi
+            devices_seen[addr_str]["last_seen"] = time.time()
+            devices_seen[addr_str]["count"] = existing.get("count", 0) + 1
+            if new_name != "(unknown)" and devices_seen[addr_str].get("name") == "(unknown)":
+                devices_seen[addr_str]["name"] = new_name
+            if new_vendor and not devices_seen[addr_str].get("vendor"):
+                devices_seen[addr_str]["vendor"] = new_vendor
+            if show_raw:
+                devices_seen[addr_str]["raw_data"] = advertisement.data
+        else:
+            devices_seen[addr_str] = {
+                "name": new_name,
+                "rssi": rssi,
+                "vendor": new_vendor,
+                "last_seen": time.time(),
+                "count": 1,
+                "raw_data": advertisement.data if show_raw else None,
+            }
 
     try:
         t = await open_transport_or_link(controller)
         config = DeviceConfiguration()
         config.keystore = "JsonKeyStore"
         config.address = Address.generate_static_address()
-        config.name = "BLESniffer"
+        config.name = "BLEScanner"
         device = Device.from_config_with_hci(config, t.source, t.sink)
         await device.power_on()
 
-        # Set scan parameters - PASSIVE (0) or ACTIVE (1)
+        # Set scan parameters - use ACTIVE scanning (1)
         # Active scanning sends SCAN_REQ to get SCAN_RSP with device names
-        # Passive scanning only listens, no transmissions
-        scan_type = 1 if active_scan else 0
         await device.send_command(
             HCI_LE_Set_Scan_Parameters_Command(
-                le_scan_type=scan_type,
+                le_scan_type=1,  # Active scanning
                 le_scan_interval=0x0010,
                 le_scan_window=0x0010,
                 own_address_type=0,
@@ -2439,7 +2450,7 @@ async def command_sniff(args: argparse.Namespace):
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        logging.error("Sniffing failed: %s", e)
+        logging.error("BLE scan failed: %s", e)
         import traceback
         traceback.print_exc()
     finally:
@@ -4012,7 +4023,7 @@ async def command_ble_info(args: argparse.Namespace):
 
     if not target_address:
         logging.error(
-            "Target address required. Use --target-address or run 'sniff --active' first.")
+            "Target address required. Use --target-address or run 'ble-scan' first.")
         signal.signal(signal.SIGINT, original_handler)
         return
 
@@ -7162,8 +7173,8 @@ async def main():
     if args.command == "scan":
         await command_scan(args)
         return
-    if args.command == "sniff":
-        await command_sniff(args)
+    if args.command == "ble-scan":
+        await command_ble_scan(args)
         return
     if args.command == "ble-info":
         await command_ble_info(args)
