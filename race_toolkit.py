@@ -136,6 +136,24 @@ def print_table(table: Table):
     _console.print(table)
 
 
+def sanitize_display(value: str) -> str:
+    """Sanitize a string for safe terminal display.
+
+    Only allows printable ASCII characters (32-126).
+    All other characters are stripped.
+
+    Args:
+        value: The string to sanitize
+
+    Returns:
+        A sanitized string safe for display
+    """
+    if not value:
+        return ""
+    # Only allow printable ASCII (32-126) - nothing else
+    return ''.join(char for char in str(value) if 32 <= ord(char) <= 126)
+
+
 def release_bluetooth_controller(controller: str):
     """Force stop any existing processes holding onto the Bluetooth controller.
 
@@ -1034,15 +1052,18 @@ def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict = None):
 
     # Add devices to table
     for i, (address, name, rssi) in enumerate(devices_with_rssi):
-        display_name = name if name and name != "(unknown)" else "(Unknown)"
+        # Sanitize display data
+        display_name = sanitize_display(
+            name) if name and name != "(unknown)" else "(Unknown)"
         if len(display_name) > 34:
             display_name = display_name[:31] + "..."
+        addr_str = sanitize_display(address)
 
         style = get_rssi_style(rssi)
         table.add_row(
             f"[{i}]",
             display_name,
-            address,
+            addr_str,
             f"{rssi}dBm" if rssi > -999 else "-",
             style=style
         )
@@ -2581,12 +2602,14 @@ async def command_ble_scan(args: argparse.Namespace):
             age = time.time() - last_seen if last_seen else 999
             tracker = info.get("tracker")
 
-            # Name display
-            name_str = raw_name if raw_name else "(unknown)"
+            # Sanitize all display data
+            addr_str = sanitize_display(addr)
+            name_str = sanitize_display(raw_name) if raw_name else "(unknown)"
+            vendor_str = sanitize_display(raw_vendor)
 
             # Info column - show tracker type or packet count
             if tracker:
-                info_str = f"⚠{tracker.get('tracker_type', 'TRACK')[:6]}"
+                info_str = f"⚠{sanitize_display(tracker.get('tracker_type', 'TRACK')[:6])}"
             else:
                 info_str = f"{pkts}pk"
 
@@ -2595,10 +2618,10 @@ async def command_ble_scan(args: argparse.Namespace):
 
             table.add_row(
                 str(idx),
-                addr,
+                addr_str,
                 f"{rssi}dBm",
                 name_str,
-                raw_vendor,
+                vendor_str,
                 info_str,
                 style=style,
             )
@@ -3010,6 +3033,11 @@ async def command_ble_scan(args: argparse.Namespace):
         connectable = info.get("connectable", False)
         tracker = info.get("tracker")
 
+        # Sanitize all display data
+        addr_str = sanitize_display(addr)
+        name_str = sanitize_display(raw_name) if raw_name else "(unknown)"
+        vendor_str = sanitize_display(raw_vendor)
+
         # Get style using helper
         style = get_rssi_style(rssi)
 
@@ -3023,13 +3051,15 @@ async def command_ble_scan(args: argparse.Namespace):
 
         # TYPE column
         if tracker:
-            device_type = tracker.get('tracker_type', 'Tracker')
+            device_type = sanitize_display(
+                tracker.get('tracker_type', 'Tracker'))
         else:
-            device_type = info.get("device_type") or ""
+            device_type = sanitize_display(info.get("device_type") or "")
 
         # INFO column
         if tracker:
-            info_str = tracker.get('tracker_type', 'TRACKER')[:8]
+            info_str = sanitize_display(
+                tracker.get('tracker_type', 'TRACKER')[:8])
         elif services > 0:
             info_str = f"{services} svcs"
         else:
@@ -3037,11 +3067,11 @@ async def command_ble_scan(args: argparse.Namespace):
 
         table.add_row(
             str(idx),
-            f"{conn_icon} {addr}",
+            f"{conn_icon} {addr_str}",
             f"{rssi}dBm",
-            raw_name or "(unknown)",
+            name_str,
             device_type,
-            raw_vendor,
+            vendor_str,
             info_str,
             style=style
         )
