@@ -2036,21 +2036,164 @@ async def command_ble_scan(args: argparse.Namespace):
         running[0] = False
     original_handler = signal.signal(signal.SIGINT, signal_handler)
 
-    # Manufacturer company IDs
+    # Extended Manufacturer Company IDs (Bluetooth SIG Assigned Numbers)
+    # Source: https://www.bluetooth.com/specifications/assigned-numbers/
     COMPANIES = {
-        0x004C: "Apple",
+        0x0003: "IBM",
+        0x0004: "Toshiba",
         0x0006: "Microsoft",
-        0x00E0: "Google",
+        0x000A: "CSR",
+        0x000D: "Texas Instruments",
+        0x000F: "Broadcom",
+        0x0013: "Atmel",
+        0x001D: "Qualcomm",
+        0x0044: "Socket Mobile",
+        0x004C: "Apple",
+        0x0059: "Nordic Semiconductor",
+        0x005F: "Wicentric",
+        0x0065: "HP",
+        0x006B: "Polar Electro",
         0x0075: "Samsung",
-        0x054C: "Sony",
-        0x0310: "Xiaomi",
-        0x0157: "Huawei",
-        0x0171: "Amazon",
+        0x0077: "Laird Connectivity",
+        0x0078: "Nike",
         0x0087: "Garmin",
-        0x00D2: "Bose",
-        0x0092: "JBL",
+        0x008A: "Jawbone",
+        0x008C: "Gimbal",
+        0x009E: "Bose",
+        0x00B5: "Swirl Networks",
+        0x00BD: "Aplix",
+        0x00C4: "LG Electronics",
+        0x00C7: "Quuppa",
+        0x00CC: "Beats Electronics",
+        0x00CD: "Microchip",
+        0x00D2: "Dialog Semiconductor",
+        0x00DF: "Misfit (Fossil)",
+        0x00E0: "Google",
+        0x00F0: "PayPal",
+        0x0104: "PLUS Location",
+        0x011B: "Aruba (HPE)",
+        0x012D: "Sony",
+        0x0131: "Cypress Semiconductor",
+        0x0136: "Seed Labs",
+        0x013A: "Tencent",
+        0x0147: "Mighty Cast",
+        0x0154: "Pebble",
+        0x0157: "Xiaomi",
+        0x015D: "Estimote",
+        0x015E: "UniKey",
+        0x0171: "Amazon",
+        0x0180: "Gigaset",
+        0x0195: "Zuli",
+        0x01AB: "Facebook (Meta)",
+        0x01B5: "Nest Labs (Google)",
+        0x01D1: "August Home",
+        0x01DA: "Logitech",
+        0x0211: "Telink",
+        0x0225: "Nestle Nespresso",
+        0x027D: "Huawei",
+        0x02B2: "Oura",
+        0x02D3: "Powercast",
+        0x02F2: "GoPro",
+        0x0309: "Dolby",
+        0x030F: "Realtek",
+        0x0310: "Xiaomi",  # Alternate ID
+        0x0399: "Nikon",
+        0x03C2: "Snapchat",
+        0x03DA: "EnOcean",
+        0x0499: "Ruuvi Innovations",
+        0x0528: "Lunera",
+        0x054C: "Sony",  # Alternate ID
+        0x0583: "Code Blue",
+        0x0590: "Pur3",
+        0x05A7: "Sonos",
+        0x060F: "Signify (Philips Hue)",
+        0x0639: "Shenzhen Minew",
         0x0269: "Fitbit",
         0x02FF: "GN Audio (Jabra)",
+        0x038F: "Tile",
+        0x0891: "Tile",  # Alternate ID
+        # Add more from online tracker detection
+        0x0046: "MediaTek",
+        0x0B00: "Espressif (ESP32)",
+        0x0047: "Murata",
+        0x0002: "Intel",
+    }
+
+    # Apple Continuity Protocol message types
+    APPLE_CONTINUITY_TYPES = {
+        0x02: "iBeacon",
+        0x03: "AirPrint",
+        0x05: "AirDrop",
+        0x06: "HomeKit",
+        0x07: "Proximity Pairing",
+        0x08: "Siri",
+        0x09: "AirPlay Target",
+        0x0A: "AirPlay Source",
+        0x0B: "Magic Switch",
+        0x0C: "Handoff",
+        0x0D: "Tethering Target",
+        0x0E: "Tethering Source",
+        0x0F: "Nearby Action",
+        0x10: "Nearby Info",
+        0x12: "FindMy",
+    }
+
+    # Apple Nearby Info action codes (device state)
+    APPLE_NEARBY_ACTION_CODES = {
+        0x00: "Unknown",
+        0x01: "Reporting Disabled",
+        0x03: "Idle",
+        0x05: "Audio+Locked",
+        0x07: "Active",
+        0x09: "Video Playing",
+        0x0A: "Watch Worn+Unlocked",
+        0x0B: "Recent Activity",
+        0x0D: "Driving",
+        0x0E: "Call Active",
+    }
+
+    # Apple Nearby Action types
+    APPLE_NEARBY_ACTION_TYPES = {
+        0x01: "Apple TV Setup",
+        0x04: "Mobile Backup",
+        0x05: "Watch Setup",
+        0x06: "Apple TV Pair",
+        0x07: "Internet Relay",
+        0x08: "WiFi Password",
+        0x09: "iOS Setup",
+        0x0A: "Repair",
+        0x0B: "Speaker Setup",
+        0x0C: "Apple Pay",
+        0x0D: "Whole Home Audio Setup",
+        0x0E: "Developer Tools Pairing",
+        0x0F: "Answered Call",
+        0x10: "Ended Call",
+        0x11: "DD Ping",
+        0x12: "DD Pong",
+        0x13: "Remote Auto Fill",
+        0x14: "Companion Link Proximity",
+        0x15: "Remote Management",
+        0x16: "Remote Auto Fill Pong",
+        0x17: "Remote Display",
+    }
+
+    # Known tracker service UUIDs (16-bit)
+    TRACKER_SERVICES = {
+        0xFEED: "Tile",
+        0xFEEC: "Tile",
+        0xFD84: "Tile",
+        0xFD6F: "COVID Exposure",  # Contact tracing
+        0xFE33: "Chipolo",
+        0xFE65: "Chipolo",
+        0xFD43: "Apple FindMy",
+        0xFD44: "Apple FindMy",
+        0xFE2C: "Google Fast Pair",
+        0xFDF0: "Google",
+        0xFDE2: "Google",
+        0xFDAB: "Xiaomi",
+        0xFDAA: "Xiaomi",
+        0xFD5A: "Samsung SmartThings",
+        0xFD69: "Samsung",
     }
 
     def get_signal_bars(rssi: int) -> str:
@@ -2071,8 +2214,187 @@ async def command_ble_scan(args: argparse.Namespace):
         mfr_data = data.get(AdvertisingData.MANUFACTURER_SPECIFIC_DATA)
         if mfr_data and isinstance(mfr_data, bytes) and len(mfr_data) >= 2:
             company_id = struct.unpack('<H', mfr_data[:2])[0]
-            return COMPANIES.get(company_id, "")
+            return COMPANIES.get(company_id, f"0x{company_id:04X}")
         return ""
+
+    def parse_apple_continuity(mfr_data: bytes) -> dict:
+        """Parse Apple Continuity protocol from manufacturer data.
+
+        Apple uses Company ID 0x004C. After the 2-byte company ID:
+        - Byte 0: Message type
+        - Byte 1: Message length
+        - Bytes 2+: Message data
+
+        Returns dict with parsed data or empty dict if not Apple or parse fails.
+        """
+        result = {}
+        if not mfr_data or len(mfr_data) < 4:
+            return result
+
+        company_id = struct.unpack('<H', mfr_data[:2])[0]
+        if company_id != 0x004C:  # Apple
+            return result
+
+        msg_type = mfr_data[2]
+        msg_len = mfr_data[3]
+
+        result["type"] = APPLE_CONTINUITY_TYPES.get(
+            msg_type, f"Unknown (0x{msg_type:02X})")
+        result["type_code"] = msg_type
+
+        # Validate message length
+        if msg_len + 4 > len(mfr_data):
+            result["error"] = f"Invalid length: expected {msg_len}, available {len(mfr_data)-4}"
+            return result
+
+        try:
+            if msg_type == 0x02:  # iBeacon
+                if msg_len >= 21:
+                    uuid_bytes = mfr_data[4:20]
+                    result["ibeacon"] = {
+                        "uuid": uuid_bytes.hex(),
+                        "major": struct.unpack('>H', mfr_data[20:22])[0],
+                        "minor": struct.unpack('>H', mfr_data[22:24])[0],
+                        "tx_power": struct.unpack('b', mfr_data[24:25])[0] if len(mfr_data) > 24 else None
+                    }
+                    result["is_tracker"] = True
+                    result["tracker_type"] = "iBeacon"
+
+            elif msg_type == 0x09:  # AirPlay Target
+                if len(mfr_data) >= 8:
+                    # Last 4 bytes are IP address
+                    ip_bytes = mfr_data[-4:]
+                    result["airplay_ip"] = f"{ip_bytes[0]}.{ip_bytes[1]}.{ip_bytes[2]}.{ip_bytes[3]}"
+
+            elif msg_type == 0x10:  # Nearby Info
+                if msg_len >= 2:
+                    flags = mfr_data[4] >> 4
+                    action_code = mfr_data[4] & 0x0F
+                    status = mfr_data[5] if len(mfr_data) > 5 else 0
+
+                    result["nearby_info"] = {
+                        "action": APPLE_NEARBY_ACTION_CODES.get(action_code, f"0x{action_code:02X}"),
+                        "action_code": action_code,
+                        "primary_device": bool(flags & 0x1),
+                        "airdrop_enabled": bool(flags & 0x4),
+                        "wifi_on": bool(status & 0x4),
+                        "screen_on": bool(status & 0x1),
+                        "watch_locked": bool(status & 0x20),
+                        "auto_lock": bool(status & 0x80),
+                    }
+
+            elif msg_type == 0x0F:  # Nearby Action
+                if msg_len >= 2:
+                    action_type = mfr_data[5] if len(mfr_data) > 5 else 0
+                    result["nearby_action"] = {
+                        "type": APPLE_NEARBY_ACTION_TYPES.get(action_type, f"0x{action_type:02X}")
+                    }
+
+            elif msg_type == 0x12:  # FindMy / AirTag
+                if len(mfr_data) > 4:
+                    status = mfr_data[4]
+                    maintained = bool((status >> 2) & 0x1)
+                    result["findmy"] = {
+                        "maintained": maintained,
+                        "status": "Owned" if maintained else "Separated"
+                    }
+                    result["is_tracker"] = True
+                    result["tracker_type"] = "AirTag/FindMy"
+
+            elif msg_type == 0x07:  # Proximity Pairing (AirPods, etc)
+                result["proximity_pairing"] = True
+                # Device model info is encoded but proprietary
+
+        except Exception as e:
+            result["parse_error"] = str(e)
+
+        return result
+
+    def detect_tracker(data: AdvertisingData) -> dict:
+        """Detect if device is a tracker (AirTag, Tile, Chipolo, etc).
+
+        Returns dict with tracker info or empty dict if not a tracker.
+        """
+        result = {}
+
+        # Check manufacturer data for Apple trackers
+        mfr_data = data.get(AdvertisingData.MANUFACTURER_SPECIFIC_DATA)
+        if mfr_data and len(mfr_data) >= 2:
+            company_id = struct.unpack('<H', mfr_data[:2])[0]
+
+            # Parse Apple Continuity for FindMy/iBeacon
+            if company_id == 0x004C:
+                apple_data = parse_apple_continuity(mfr_data)
+                if apple_data.get("is_tracker"):
+                    result.update(apple_data)
+
+            # Tile uses company ID 0x038F or 0x0891
+            elif company_id in (0x038F, 0x0891):
+                result["is_tracker"] = True
+                result["tracker_type"] = "Tile"
+
+        # Check service UUIDs for tracker services
+        service_uuids = data.get(
+            AdvertisingData.COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS)
+        if not service_uuids:
+            service_uuids = data.get(
+                AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS)
+
+        if service_uuids and isinstance(service_uuids, bytes):
+            # Parse 16-bit UUIDs (2 bytes each, little-endian)
+            for i in range(0, len(service_uuids), 2):
+                if i + 1 < len(service_uuids):
+                    uuid16 = struct.unpack('<H', service_uuids[i:i+2])[0]
+                    if uuid16 in TRACKER_SERVICES:
+                        result["is_tracker"] = True
+                        result["tracker_type"] = result.get(
+                            "tracker_type") or TRACKER_SERVICES[uuid16]
+                        result["tracker_service"] = f"0x{uuid16:04X}"
+
+        return result
+
+    def get_advertisement_details(data: AdvertisingData) -> dict:
+        """Extract all interesting details from advertisement data."""
+        details = {}
+
+        # Get manufacturer data
+        mfr_data = data.get(AdvertisingData.MANUFACTURER_SPECIFIC_DATA)
+        if mfr_data and len(mfr_data) >= 2:
+            company_id = struct.unpack('<H', mfr_data[:2])[0]
+            details["company_id"] = f"0x{company_id:04X}"
+            details["company"] = COMPANIES.get(company_id, "Unknown")
+
+            # Parse Apple Continuity
+            if company_id == 0x004C:
+                apple_data = parse_apple_continuity(mfr_data)
+                if apple_data:
+                    details["apple"] = apple_data
+
+        # Detect trackers
+        tracker_info = detect_tracker(data)
+        if tracker_info.get("is_tracker"):
+            details["tracker"] = tracker_info
+
+        # Check for service UUIDs
+        for uuid_type in [AdvertisingData.COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
+                          AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS]:
+            service_uuids = data.get(uuid_type)
+            if service_uuids and isinstance(service_uuids, bytes):
+                uuids = []
+                for i in range(0, len(service_uuids), 2):
+                    if i + 1 < len(service_uuids):
+                        uuid16 = struct.unpack('<H', service_uuids[i:i+2])[0]
+                        uuids.append(f"0x{uuid16:04X}")
+                if uuids:
+                    details["service_uuids"] = uuids
+                break
+
+        # TX Power Level
+        tx_power = data.get(AdvertisingData.TX_POWER_LEVEL)
+        if tx_power is not None:
+            details["tx_power"] = tx_power
+
+        return details
 
     def clear_screen():
         """Clear terminal screen and reset cursor to top."""
@@ -2109,18 +2431,25 @@ async def command_ble_scan(args: argparse.Namespace):
             status_str = "  |  \033[1;31m⏸ SCAN PAUSED\033[0m"
         else:
             status_str = ""
-        stats = f"  Devices: \033[1;33m{len(devices_seen)}\033[0m  |  Packets: \033[1;33m{packet_count[0]}\033[0m  |  Time: \033[1;33m{elapsed:.0f}s\033[0m{status_str}"
+
+        # Count trackers for warning
+        tracker_count = sum(
+            1 for _, info in devices_seen.items() if info.get("tracker"))
+        tracker_str = f"  |  \033[1;31m⚠ {tracker_count} TRACKER(S)\033[0m" if tracker_count > 0 else ""
+
+        stats = f"  Devices: \033[1;33m{len(devices_seen)}\033[0m  |  Packets: \033[1;33m{packet_count[0]}\033[0m  |  Time: \033[1;33m{elapsed:.0f}s\033[0m{tracker_str}{status_str}"
         print(stats)
         print()
 
-        # Table header - fixed width columns
-        header = f"{'#':>3}  {'ADDRESS':<20}  {'RSSI':>7}  {'NAME':<20}  {'VENDOR':<14}  {'PKTS':>5}"
+        # Table header - fixed width columns (added INFO column)
+        header = f"{'#':>3}  {'ADDRESS':<20}  {'RSSI':>7}  {'NAME':<20}  {'VENDOR':<14}  {'INFO':<8}"
         print("\033[1;37;44m  " + header + "  \033[0m")
 
-        # Sort devices by packet count (most active first)
+        # Sort devices - trackers first, then by packet count
         sorted_devices = sorted(
             devices_seen.items(),
-            key=lambda x: x[1].get("count", 0),
+            key=lambda x: (1 if x[1].get("tracker")
+                           else 0, x[1].get("count", 0)),
             reverse=True
         )
 
@@ -2131,15 +2460,24 @@ async def command_ble_scan(args: argparse.Namespace):
         # Display devices
         for idx, (addr, info) in enumerate(sorted_devices[:max_rows], 1):
             rssi = info.get("rssi", -99)
-            name = info.get("name", "(unknown)")[:24]
-            vendor = info.get("vendor", "")[:16]
+            name = info.get("name", "(unknown)")[:20]
+            vendor = info.get("vendor", "")[:14]
             pkts = info.get("count", 0)
             bars = get_signal_bars(rssi)
             last_seen = info.get("last_seen", 0)
             age = time.time() - last_seen if last_seen else 999
+            tracker = info.get("tracker")
 
-            # Color code by signal strength
-            if rssi >= -50:
+            # Info column - show tracker type or packet count
+            if tracker:
+                info_str = f"⚠{tracker.get('tracker_type', 'TRACK')[:6]}"
+            else:
+                info_str = f"{pkts:>5}pk"
+
+            # Color code - trackers in red, otherwise by signal strength
+            if tracker:
+                color = "\033[1;31m"  # Red for trackers
+            elif rssi >= -50:
                 color = "\033[1;32m"  # Green - excellent
             elif rssi >= -60:
                 color = "\033[1;92m"  # Light green - good
@@ -2150,11 +2488,11 @@ async def command_ble_scan(args: argparse.Namespace):
             else:
                 color = "\033[1;90m"  # Gray - very weak
 
-            # Dim if not seen recently
-            if age > 5:
+            # Dim if not seen recently (but not trackers)
+            if age > 5 and not tracker:
                 color = "\033[2m"  # Dim
 
-            row = f"{idx:>3}  {addr:<20}  {rssi:>4}dBm  {name:<20}  {vendor:<14}  {pkts:>5}"
+            row = f"{idx:>3}  {addr:<20}  {rssi:>4}dBm  {name:<20}  {vendor:<14}  {info_str:<8}"
             print(f"{color}  {row}  \033[0m")
 
         # Fill remaining rows
@@ -2187,6 +2525,8 @@ async def command_ble_scan(args: argparse.Namespace):
         # Get name from advertisement data
         name = None
         vendor = ""
+        adv_details = {}
+        tracker_info = {}
         if advertisement.data:
             name = advertisement.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
             if not name:
@@ -2195,6 +2535,10 @@ async def command_ble_scan(args: argparse.Namespace):
             if name and isinstance(name, bytes):
                 name = name.decode('utf-8', errors='replace')
             vendor = get_manufacturer(advertisement.data)
+
+            # Parse detailed advertisement data (Apple Continuity, trackers, etc.)
+            adv_details = get_advertisement_details(advertisement.data)
+            tracker_info = detect_tracker(advertisement.data)
 
         if name_filter:
             if not name or name_filter.lower() not in name.lower():
@@ -2220,6 +2564,11 @@ async def command_ble_scan(args: argparse.Namespace):
                 devices_seen[addr_str]["vendor"] = new_vendor
             if show_raw:
                 devices_seen[addr_str]["raw_data"] = advertisement.data
+            # Update advertisement details if we got new ones
+            if adv_details:
+                devices_seen[addr_str]["adv_details"] = adv_details
+            if tracker_info.get("is_tracker"):
+                devices_seen[addr_str]["tracker"] = tracker_info
         else:
             devices_seen[addr_str] = {
                 "name": new_name,
@@ -2228,6 +2577,8 @@ async def command_ble_scan(args: argparse.Namespace):
                 "last_seen": time.time(),
                 "count": 1,
                 "raw_data": advertisement.data if show_raw else None,
+                "adv_details": adv_details,
+                "tracker": tracker_info if tracker_info.get("is_tracker") else None,
             }
 
     try:
@@ -2489,13 +2840,22 @@ async def command_ble_scan(args: argparse.Namespace):
         print("  No devices found.\n")
         return None
 
+    # Count trackers
+    tracker_count = sum(1 for _, info in devices_seen.items()
+                        if info.get("tracker"))
+    if tracker_count > 0:
+        print(
+            f"  \033[1;31m⚠ TRACKERS DETECTED: {tracker_count} potential tracking device(s)\033[0m\n")
+
     # Sort by connectable + name + RSSI for final display
     def sort_key(item):
         addr, info = item
         has_name = 1 if info.get("name") and info["name"] != "(unknown)" else 0
         connectable = 1 if info.get("connectable") else 0
+        # Show trackers prominently
+        is_tracker = 1 if info.get("tracker") else 0
         rssi = info.get("rssi", -999)
-        return (connectable, has_name, rssi)
+        return (is_tracker, connectable, has_name, rssi)
 
     sorted_devices = sorted(devices_seen.items(), key=sort_key, reverse=True)
 
@@ -2510,7 +2870,7 @@ async def command_ble_scan(args: argparse.Namespace):
 
     # Display enriched selection table directly (no second enumeration phase)
     print("\033[1;37;44m" +
-          f"  {'#':<3} {'ADDRESS':<20} {'RSSI':<7} {'NAME':<22} {'TYPE':<12} {'VENDOR':<15} {'SVCS':<4}" + "\033[0m")
+          f"  {'#':<3} {'ADDRESS':<20} {'RSSI':<7} {'NAME':<22} {'TYPE':<12} {'VENDOR':<15} {'INFO':<8}" + "\033[0m")
     print()
 
     for idx, (addr, info) in enumerate(sorted_devices, 1):
@@ -2520,9 +2880,20 @@ async def command_ble_scan(args: argparse.Namespace):
         device_type = info.get("device_type", "")[:12]
         services = info.get("services_count", 0)
         connectable = info.get("connectable", False)
+        tracker = info.get("tracker")
 
-        # Color based on connectivity and signal
-        if connectable:
+        # Determine info column content
+        if tracker:
+            info_str = f"🔴{tracker.get('tracker_type', 'TRACKER')[:6]}"
+        elif services > 0:
+            info_str = f"{services} svcs"
+        else:
+            info_str = "-"
+
+        # Color based on tracker/connectivity and signal
+        if tracker:
+            color = "\033[1;31m"  # Red for trackers
+        elif connectable:
             if rssi >= -60:
                 color = "\033[1;32m"  # Green - connectable, strong
             elif rssi >= -80:
@@ -2533,16 +2904,15 @@ async def command_ble_scan(args: argparse.Namespace):
             color = "\033[1;90m"  # Gray - not connectable
 
         # Connection indicator
-        conn_icon = "●" if connectable else "○"
-        svcs_str = str(services) if services > 0 else "-"
+        conn_icon = "●" if connectable else ("⚠" if tracker else "○")
 
         print(
-            f"{color}  {idx:<3} {conn_icon} {addr:<20} {rssi:>4}dBm {name:<22} {device_type:<12} {vendor:<15} {svcs_str:<4}\033[0m")
+            f"{color}  {idx:<3} {conn_icon} {addr:<20} {rssi:>4}dBm {name:<22} {device_type:<12} {vendor:<15} {info_str:<8}\033[0m")
 
     print()
-    print("\033[1;36m" + "-" * 90 + "\033[0m")
+    print("\033[1;36m" + "-" * 95 + "\033[0m")
     print(
-        "  \033[1;32m●\033[0m = Connectable    \033[1;90m○\033[0m = Not connectable/timed out")
+        "  \033[1;32m●\033[0m = Connectable    \033[1;90m○\033[0m = Not connectable    \033[1;31m⚠\033[0m = Potential Tracker")
 
     # Device selection
     try:
@@ -2556,6 +2926,8 @@ async def command_ble_scan(args: argparse.Namespace):
                     name = selected_info.get('name', 'unknown')
                     model = selected_info.get('model', '')
                     vendor = selected_info.get('vendor', '')
+                    tracker = selected_info.get('tracker')
+                    adv_details = selected_info.get('adv_details', {})
 
                     print(f"\n  \033[1;32mSelected: {selected_addr}\033[0m")
                     if name and name != "(unknown)":
@@ -2564,6 +2936,44 @@ async def command_ble_scan(args: argparse.Namespace):
                         print(f"  \033[1;37mModel: {model}\033[0m")
                     if vendor:
                         print(f"  \033[1;37mVendor: {vendor}\033[0m")
+
+                    # Show tracker warning
+                    if tracker:
+                        print(
+                            f"\n  \033[1;31m⚠ TRACKER DETECTED: {tracker.get('tracker_type', 'Unknown')}\033[0m")
+                        if tracker.get('findmy'):
+                            fm = tracker['findmy']
+                            print(f"    Status: {fm.get('status', 'Unknown')}")
+                        if tracker.get('ibeacon'):
+                            ib = tracker['ibeacon']
+                            print(f"    iBeacon UUID: {ib.get('uuid', 'N/A')}")
+                            print(
+                                f"    Major/Minor: {ib.get('major', 'N/A')}/{ib.get('minor', 'N/A')}")
+
+                    # Show Apple Continuity details
+                    if adv_details.get('apple'):
+                        apple = adv_details['apple']
+                        print(
+                            f"\n  \033[1;35mApple Continuity: {apple.get('type', 'Unknown')}\033[0m")
+                        if apple.get('nearby_info'):
+                            ni = apple['nearby_info']
+                            print(
+                                f"    Device State: {ni.get('action', 'Unknown')}")
+                            print(
+                                f"    WiFi: {'On' if ni.get('wifi_on') else 'Off'}, Screen: {'On' if ni.get('screen_on') else 'Off'}")
+                            if ni.get('airdrop_enabled'):
+                                print(f"    AirDrop: Enabled")
+                        if apple.get('airplay_ip'):
+                            print(f"    AirPlay IP: {apple['airplay_ip']}")
+                        if apple.get('nearby_action'):
+                            print(
+                                f"    Action: {apple['nearby_action'].get('type', 'Unknown')}")
+
+                    # Show company ID if known
+                    if adv_details.get('company_id'):
+                        print(
+                            f"\n  \033[1;36mCompany ID: {adv_details['company_id']} ({adv_details.get('company', 'Unknown')})\033[0m")
+
                     print(
                         f"\n  \033[1;37mYou can now use this address with other commands:\033[0m")
                     print(
@@ -2728,10 +3138,18 @@ KNOWN_BLE_SPECIFICATIONS = {
     },
     # Apple Find My / AirTag
     "fd43": {
-        "name": "Apple Find My Service",
-        "description": "Apple Find My network service",
+        "name": "⚠️ Apple Find My Service",
+        "description": "Apple Find My network service - POTENTIAL TRACKING DEVICE (AirTag, etc)",
         "spec": "Apple Find My Network",
-        "url": "https://support.apple.com/guide/security/find-my-network-security"
+        "url": "https://support.apple.com/guide/security/find-my-network-security",
+        "tracker": True
+    },
+    "fd44": {
+        "name": "⚠️ Apple Find My Service (Alt)",
+        "description": "Apple Find My network service (alternate) - POTENTIAL TRACKING DEVICE",
+        "spec": "Apple Find My Network",
+        "url": "https://support.apple.com/guide/security/find-my-network-security",
+        "tracker": True
     },
     # Apple AirPods
     "74ec2172-0bad-4d01-8f77-997b2be0722a": {
@@ -3297,22 +3715,80 @@ KNOWN_BLE_SPECIFICATIONS = {
     # ═══════════════════════════════════════════════════════════════════════════
 
     "feed": {
-        "name": "Tile Service (Short)",
-        "description": "Tile tracker service",
+        "name": "⚠️ Tile Tracker Service",
+        "description": "Tile tracker service - POTENTIAL TRACKING DEVICE",
         "spec": "Tile Protocol",
-        "url": None
+        "url": None,
+        "tracker": True
+    },
+    "feec": {
+        "name": "⚠️ Tile Tracker Service (Alt)",
+        "description": "Tile tracker service (alternate UUID) - POTENTIAL TRACKING DEVICE",
+        "spec": "Tile Protocol",
+        "url": None,
+        "tracker": True
+    },
+    "fd84": {
+        "name": "⚠️ Tile Tracker Service (New)",
+        "description": "Tile tracker service (new format) - POTENTIAL TRACKING DEVICE",
+        "spec": "Tile Protocol",
+        "url": None,
+        "tracker": True
     },
     "0000feed-0000-1000-8000-00805f9b34fb": {
-        "name": "Tile Service",
-        "description": "Tile tracker communication service",
+        "name": "⚠️ Tile Service",
+        "description": "Tile tracker communication service - POTENTIAL TRACKING DEVICE",
         "spec": "Tile Protocol",
-        "url": None
+        "url": None,
+        "tracker": True
     },
     "9d410018-35d6-f4dd-ba60-e7bd8dc491c0": {
         "name": "Tile TOA Service",
         "description": "Tile TOA (Time of Arrival) ranging service",
         "spec": "Tile Protocol",
         "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CHIPOLO - Trackers
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "fe33": {
+        "name": "⚠️ Chipolo Tracker Service",
+        "description": "Chipolo tracker service - POTENTIAL TRACKING DEVICE",
+        "spec": "Chipolo Protocol",
+        "url": None,
+        "tracker": True
+    },
+    "fe65": {
+        "name": "⚠️ Chipolo Tracker Service (Alt)",
+        "description": "Chipolo tracker service (alternate) - POTENTIAL TRACKING DEVICE",
+        "spec": "Chipolo Protocol",
+        "url": None,
+        "tracker": True
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SAMSUNG SMARTTAG - Trackers
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "fd5a": {
+        "name": "⚠️ Samsung SmartTag Service",
+        "description": "Samsung SmartTag/SmartThings tracker - POTENTIAL TRACKING DEVICE",
+        "spec": "Samsung SmartThings Protocol",
+        "url": None,
+        "tracker": True
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # COVID-19 EXPOSURE NOTIFICATION
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "fd6f": {
+        "name": "COVID-19 Exposure Notification",
+        "description": "Apple/Google COVID-19 contact tracing service",
+        "spec": "Exposure Notification Bluetooth Specification",
+        "url": "https://covid19.apple.com/contacttracing"
     },
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -4103,8 +4579,15 @@ def format_characteristic_value(short_id: str, char_name: str, value: bytes, app
         if short_id and short_id.lower() == "2aa6" and len(value) >= 1:
             return "Supported" if value[0] else "Not Supported"
 
-        # Server/Client Supported Features (bitmask)
-        if short_id and short_id.lower() in {"2b29", "2b3a"} and len(value) >= 1:
+        # Server Supported Features (0x2B3A) - bitmask
+        if short_id and short_id.lower() == "2b3a" and len(value) >= 1:
+            features = []
+            if value[0] & 0x01:
+                features.append("EATT Supported")
+            return ", ".join(features) if features else "No optional features (0x00)"
+
+        # Client Supported Features (0x2B29) - bitmask
+        if short_id and short_id.lower() == "2b29" and len(value) >= 1:
             features = []
             if value[0] & 0x01:
                 features.append("Robust Caching")
@@ -4112,11 +4595,17 @@ def format_characteristic_value(short_id: str, char_name: str, value: bytes, app
                 features.append("EATT")
             if value[0] & 0x04:
                 features.append("Multiple Handle Value Notifications")
-            return ", ".join(features) if features else f"0x{value[0]:02X}"
+            return ", ".join(features) if features else "No features enabled (0x00)"
 
-        # Database Hash (16 bytes)
-        if short_id and short_id.lower() == "2b2a":
-            return value.hex()
+        # Database Hash (16 bytes) - used to detect GATT database changes
+        if short_id and short_id.lower() == "2b2a" and len(value) >= 16:
+            return f"GATT DB Hash: {value.hex()}"
+
+        # Service Changed (0x2A05) - indicates range of affected handles
+        if short_id and short_id.lower() == "2a05" and len(value) >= 4:
+            start_handle = struct.unpack('<H', value[0:2])[0]
+            end_handle = struct.unpack('<H', value[2:4])[0]
+            return f"Changed handles: 0x{start_handle:04X} - 0x{end_handle:04X}"
 
         # Try to decode as UTF-8 string if it looks like text
         try:
@@ -5083,6 +5572,37 @@ async def command_ble_info(args: argparse.Namespace):
                     char_name, formatted_value, raw_value)
             if char_name:
                 read_values_by_name[char_name] = (formatted_value, raw_value)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # TRACKER DETECTION WARNING
+        # ═══════════════════════════════════════════════════════════════════
+        tracker_services_found = []
+        tracker_service_uuids = ["fd43", "fd44", "feed",
+                                 "feec", "fd84", "fe33", "fe65", "fd5a", "fd6f"]
+        for svc_uuid, svc_name, svc_icon, svc in services_found:
+            # Check short UUID format
+            short_uuid = svc_uuid.split(
+                "-")[0].replace("0000", "") if "-" in svc_uuid else svc_uuid
+            if any(tracker_uuid in svc_uuid.lower() or tracker_uuid == short_uuid for tracker_uuid in tracker_service_uuids):
+                # Look up the tracker type
+                spec = KNOWN_BLE_SPECIFICATIONS.get(short_uuid, {})
+                tracker_name = spec.get("name", svc_name) if spec else svc_name
+                tracker_services_found.append((short_uuid, tracker_name))
+
+        if tracker_services_found:
+            print(
+                f"\n  \033[1;31m╔══════════════════════════════════════════════════════════════╗\033[0m")
+            print(
+                f"  \033[1;31m║  ⚠️  POTENTIAL TRACKING DEVICE DETECTED                       ║\033[0m")
+            print(
+                f"  \033[1;31m╚══════════════════════════════════════════════════════════════╝\033[0m")
+            for tracker_uuid, tracker_name in tracker_services_found:
+                print(
+                    f"    \033[1;31m• {tracker_name} (0x{tracker_uuid.upper()})\033[0m")
+            print(
+                f"    \033[0;33mThis device may be a location tracker (AirTag, Tile, etc.)\033[0m")
+            print(
+                f"    \033[0;33mIf unexpected, check for unwanted tracking: https://support.apple.com/HT212227\033[0m")
 
         # ═══════════════════════════════════════════════════════════════════
         # BASIC DEVICE IDENTITY
