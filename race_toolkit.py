@@ -712,7 +712,7 @@ def parse_args():
     # BLE Info subcommand - enumerate BLE device information
     ble_info_parser = subparsers.add_parser(
         "ble-info",
-        help="Enumerate BLE GATT services without auth (CVE-2025-20700 PoC)"
+        help="Enumerate BLE GATT services and read all characteristics without auth"
     )
     ble_info_parser.add_argument(
         "--timeout",
@@ -3978,6 +3978,165 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
         print(f"       https://fccid.io/search?q={vendor_search}")
 
 
+def format_characteristic_value(short_id: str, char_name: str, value: bytes, appearances: dict) -> str:
+    """Format a characteristic value based on its type for human-readable display."""
+    if not value:
+        return "(empty)"
+
+    # Try to decode based on known characteristic types
+    try:
+        # String characteristics
+        string_chars = {"2a00", "2a24", "2a25", "2a26", "2a27", "2a28", "2a29",
+                        "2b93", "2b97", "2bb3", "2bb4", "2bc2"}  # Names, titles, provider names
+        if short_id and short_id.lower() in string_chars:
+            decoded = value.decode('utf-8', errors='replace').strip('\x00')
+            if decoded and decoded.isprintable():
+                return f'"{decoded}"'
+
+        # Appearance (2 bytes)
+        if short_id and short_id.lower() == "2a01" and len(value) >= 2:
+            appearance = struct.unpack('<H', value[:2])[0]
+            appearance_name = appearances.get(appearance, f"Unknown")
+            return f"{appearance_name} (0x{appearance:04X})"
+
+        # Battery Level (1 byte, 0-100%)
+        if short_id and short_id.lower() == "2a19" and len(value) >= 1:
+            return f"{value[0]}%"
+
+        # Media State (1 byte)
+        if short_id and short_id.lower() == "2ba3" and len(value) >= 1:
+            states = {0: "Inactive", 1: "Playing", 2: "Paused", 3: "Seeking"}
+            return states.get(value[0], f"Unknown (0x{value[0]:02X})")
+
+        # Bearer Technology (1 byte)
+        if short_id and short_id.lower() == "2bb5" and len(value) >= 1:
+            techs = {0: "3G", 1: "4G/LTE", 2: "LTE", 3: "WiFi",
+                     4: "5G", 5: "GSM", 6: "CDMA", 7: "2G", 8: "WCDMA"}
+            return techs.get(value[0], f"Unknown (0x{value[0]:02X})")
+
+        # Playing Order (1 byte)
+        if short_id and short_id.lower() == "2ba1" and len(value) >= 1:
+            orders = {0x01: "Single Once", 0x02: "Single Repeat", 0x03: "In Order Once",
+                      0x04: "In Order Repeat", 0x05: "Oldest Once", 0x06: "Oldest Repeat",
+                      0x07: "Newest Once", 0x08: "Newest Repeat", 0x09: "Shuffle Once",
+                      0x0A: "Shuffle Repeat"}
+            return orders.get(value[0], f"Unknown (0x{value[0]:02X})")
+
+        # Track Duration/Position (4 bytes, int32 in 0.01 second units)
+        if short_id and short_id.lower() in {"2b98", "2b99"} and len(value) >= 4:
+            centiseconds = struct.unpack('<i', value[:4])[0]
+            if centiseconds < 0:
+                return "Unknown/Not Playing"
+            seconds = centiseconds // 100
+            minutes = seconds // 60
+            secs = seconds % 60
+            return f"{minutes}:{secs:02d}"
+
+        # Playback Speed (1 byte, signed, speed = 2^(value/64))
+        if short_id and short_id.lower() == "2b9a" and len(value) >= 1:
+            speed_exp = struct.unpack('b', value[:1])[0]
+            speed = 2 ** (speed_exp / 64)
+            return f"{speed:.2f}x"
+
+        # TMAP Role (2 bytes, bitmask)
+        if short_id and short_id.lower() == "2b51" and len(value) >= 2:
+            role = struct.unpack('<H', value[:2])[0]
+            roles = []
+            if role & 0x0001:
+                roles.append("Call Gateway")
+            if role & 0x0002:
+                roles.append("Call Terminal")
+            if role & 0x0004:
+                roles.append("Unicast Media Sender")
+            if role & 0x0008:
+                roles.append("Unicast Media Receiver")
+            if role & 0x0010:
+                roles.append("Broadcast Media Sender")
+            if role & 0x0020:
+                roles.append("Broadcast Media Receiver")
+            return ", ".join(roles) if roles else f"0x{role:04X}"
+
+        # Content Control ID (1 byte)
+        if short_id and short_id.lower() == "2bba" and len(value) >= 1:
+            return f"CCID: {value[0]}"
+
+        # Call State (variable length)
+        if short_id and short_id.lower() == "2bbd" and len(value) >= 3:
+            call_states = {0: "Incoming", 1: "Dialing", 2: "Alerting", 3: "Active",
+                           4: "Locally Held", 5: "Remotely Held", 6: "Locally/Remotely Held"}
+            states_str = []
+            i = 0
+            while i + 2 < len(value):
+                call_idx = value[i]
+                state = value[i + 1]
+                flags = value[i + 2]
+                state_name = call_states.get(state, f"Unknown({state})")
+                flag_str = []
+                if flags & 0x01:
+                    flag_str.append("Outgoing")
+                if flags & 0x02:
+                    flag_str.append("Withheld")
+                if flags & 0x04:
+                    flag_str.append("Provided by Network")
+                states_str.append(
+                    f"Call {call_idx}: {state_name}" + (f" [{', '.join(flag_str)}]" if flag_str else ""))
+                i += 3
+            return "; ".join(states_str) if states_str else "No active calls"
+
+        # Status Flags (2 bytes)
+        if short_id and short_id.lower() == "2bbb" and len(value) >= 2:
+            flags = struct.unpack('<H', value[:2])[0]
+            flag_names = []
+            if flags & 0x0001:
+                flag_names.append("Inband Ringtone")
+            if flags & 0x0002:
+                flag_names.append("Silent Mode")
+            return ", ".join(flag_names) if flag_names else f"0x{flags:04X}"
+
+        # URI Schemes Supported (variable)
+        if short_id and short_id.lower() == "2bb6":
+            decoded = value.decode('utf-8', errors='replace').strip('\x00')
+            if decoded:
+                return f'"{decoded}"'
+
+        # Central Address Resolution (1 byte)
+        if short_id and short_id.lower() == "2aa6" and len(value) >= 1:
+            return "Supported" if value[0] else "Not Supported"
+
+        # Server/Client Supported Features (bitmask)
+        if short_id and short_id.lower() in {"2b29", "2b3a"} and len(value) >= 1:
+            features = []
+            if value[0] & 0x01:
+                features.append("Robust Caching")
+            if value[0] & 0x02:
+                features.append("EATT")
+            if value[0] & 0x04:
+                features.append("Multiple Handle Value Notifications")
+            return ", ".join(features) if features else f"0x{value[0]:02X}"
+
+        # Database Hash (16 bytes)
+        if short_id and short_id.lower() == "2b2a":
+            return value.hex()
+
+        # Try to decode as UTF-8 string if it looks like text
+        try:
+            decoded = value.decode('utf-8', errors='strict').strip('\x00')
+            if decoded and all(c.isprintable() or c.isspace() for c in decoded):
+                return f'"{decoded}"'
+        except (UnicodeDecodeError, ValueError):
+            pass
+
+        # Show as hex with length
+        if len(value) <= 16:
+            return f"[{len(value)} bytes] {value.hex()}"
+        else:
+            return f"[{len(value)} bytes] {value[:16].hex()}..."
+
+    except Exception as e:
+        logging.debug(f"Error formatting value: {e}")
+        return f"[{len(value)} bytes] {value.hex()[:32]}..."
+
+
 async def command_ble_info(args: argparse.Namespace):
     """Enumerate BLE device information by connecting and reading GATT services.
 
@@ -4065,14 +4224,19 @@ async def command_ble_info(args: argparse.Namespace):
 
     # Well-known characteristic UUIDs with descriptions
     CHARACTERISTIC_NAMES = {
+        # Generic Access (0x1800)
         "2a00": ("Device Name", "The user-friendly name of the device"),
         "2a01": ("Appearance", "Device appearance category (e.g., phone, watch)"),
         "2a02": ("Peripheral Privacy Flag", "Privacy settings for the device"),
         "2a03": ("Reconnection Address", "Address for reconnection"),
         "2a04": ("Peripheral Preferred Connection", "Preferred connection parameters"),
+        "2aa6": ("Central Address Resolution", "Indicates if device supports address resolution"),
+        # Generic Attribute (0x1801)
         "2a05": ("Service Changed", "Indicates GATT database has changed"),
-        "2a19": ("Battery Level", "Current battery percentage (0-100%)"),
-        "2a1a": ("Battery Power State", "Charging/discharging state"),
+        "2b29": ("Client Supported Features", "Features supported by GATT client"),
+        "2b2a": ("Database Hash", "Hash of GATT database for caching"),
+        "2b3a": ("Server Supported Features", "Features supported by GATT server"),
+        # Device Information (0x180A)
         "2a23": ("System ID", "Unique system identifier"),
         "2a24": ("Model Number", "Device model number string"),
         "2a25": ("Serial Number", "Device serial number"),
@@ -4081,15 +4245,76 @@ async def command_ble_info(args: argparse.Namespace):
         "2a28": ("Software Revision", "Software version string"),
         "2a29": ("Manufacturer Name", "Manufacturer name string"),
         "2a2a": ("IEEE Regulatory Cert", "Regulatory certification data"),
+        "2a50": ("PnP ID", "Vendor/Product ID information"),
+        # Battery Service (0x180F)
+        "2a19": ("Battery Level", "Current battery percentage (0-100%)"),
+        "2a1a": ("Battery Power State", "Charging/discharging state"),
+        "2a1b": ("Battery Level State", "Battery level with state info"),
+        # Generic Media Control Service (0x1849)
+        "2b93": ("Media Player Name", "Name of the current media player app"),
+        "2b94": ("Media Player Icon ObjID", "Icon object ID for media player"),
+        "2b95": ("Media Player Icon URL", "URL to media player icon"),
+        "2b96": ("Track Changed", "Notification when track changes"),
+        "2b97": ("Track Title", "Title of current track"),
+        "2b98": ("Track Duration", "Duration of current track in 0.01s"),
+        "2b99": ("Track Position", "Current playback position in 0.01s"),
+        "2b9a": ("Playback Speed", "Current playback speed multiplier"),
+        "2b9b": ("Seeking Speed", "Speed when fast forwarding/rewinding"),
+        "2b9c": ("Current Track Segments ObjID", "Track segments object ID"),
+        "2b9d": ("Current Track ObjID", "Current track object ID"),
+        "2b9e": ("Next Track ObjID", "Next track object ID"),
+        "2b9f": ("Parent Group ObjID", "Parent group object ID"),
+        "2ba0": ("Current Group ObjID", "Current group object ID"),
+        "2ba1": ("Playing Order", "Order of playback (shuffle, repeat, etc)"),
+        "2ba2": ("Playing Orders Supported", "Supported playback orders"),
+        "2ba3": ("Media State", "Current state (playing, paused, stopped)"),
+        "2ba4": ("Media Control Point", "Control commands (play, pause, etc)"),
+        "2ba5": ("Media Control Opcodes Supported", "Supported control commands"),
+        "2ba6": ("Search Results ObjID", "Search results object ID"),
+        "2ba7": ("Search Control Point", "Search commands"),
+        "2bba": ("Content Control ID", "Unique ID for content control"),
+        # Generic Telephone Bearer Service (0x184C)
+        "2bb3": ("Bearer Provider Name", "Name of phone carrier/provider"),
+        "2bb4": ("Bearer UCI", "Uniform Caller Identifier"),
+        "2bb5": ("Bearer Technology", "Network type (GSM, LTE, 5G, WiFi)"),
+        "2bb6": ("Bearer URI Schemes", "Supported URI schemes (tel:, sip:)"),
+        "2bb7": ("Bearer Signal Strength", "Signal strength value"),
+        "2bb8": ("Bearer Signal Strength Reporting Interval", "How often to report signal"),
+        "2bb9": ("Bearer List Current Calls", "List of active/held calls"),
+        "2bbb": ("Status Flags", "Call status flags"),
+        "2bbc": ("Incoming Call Target Bearer URI", "URI of incoming call destination"),
+        "2bbd": ("Call State", "State of current call"),
+        "2bbe": ("Call Control Point", "Call commands (answer, hangup, etc)"),
+        "2bbf": ("Call Control Point Optional Opcodes", "Optional call commands supported"),
+        "2bc0": ("Termination Reason", "Why call ended"),
+        "2bc1": ("Incoming Call", "Info about incoming call"),
+        "2bc2": ("Call Friendly Name", "Name of caller/callee"),
+        # Telephony and Media Audio Service (0x1855) - TMAP
+        "2b51": ("TMAP Role", "Telephony/Media Audio Profile role"),
+        # Volume Control Service (0x1844)
+        "2b7d": ("Volume State", "Current volume level and mute state"),
+        "2b7e": ("Volume Control Point", "Volume commands"),
+        "2b7f": ("Volume Flags", "Volume feature flags"),
+        # Microphone Control Service (0x184D)
+        "2bc3": ("Mute", "Microphone mute state"),
+        # Audio Input Control Service (0x1843)
+        "2b77": ("Audio Input State", "State of audio input"),
+        "2b78": ("Gain Settings Attribute", "Gain settings"),
+        "2b79": ("Audio Input Type", "Type of audio input"),
+        "2b7a": ("Audio Input Status", "Status of audio input"),
+        "2b7b": ("Audio Input Control Point", "Control audio input"),
+        "2b7c": ("Audio Input Description", "Description of input"),
+        # Heart Rate Service (0x180D)
         "2a37": ("Heart Rate Measurement", "Current heart rate in BPM"),
         "2a38": ("Body Sensor Location", "Where sensor is worn"),
         "2a39": ("Heart Rate Control Point", "Reset energy expended"),
-        "2a4d": ("Report", "HID input/output report data"),
-        "2a4e": ("Protocol Mode", "HID boot/report protocol mode"),
+        # HID Service (0x1812)
         "2a4a": ("HID Information", "HID version and country code"),
         "2a4b": ("Report Map", "HID report descriptor"),
         "2a4c": ("HID Control Point", "Suspend/exit suspend"),
-        "2a50": ("PnP ID", "Vendor/Product ID information"),
+        "2a4d": ("Report", "HID input/output report data"),
+        "2a4e": ("Protocol Mode", "HID boot/report protocol mode"),
+        # Environmental Sensing (0x181A)
         "2a6e": ("Temperature", "Temperature measurement"),
         "2a6f": ("Humidity", "Humidity percentage"),
         "2a76": ("UV Index", "UV radiation index"),
@@ -4098,6 +4323,34 @@ async def command_ble_info(args: argparse.Namespace):
         "2a79": ("Wind Speed", "Wind speed measurement"),
         "2aa1": ("Magnetic Flux Density 2D", "Compass data"),
         "2aa2": ("Magnetic Flux Density 3D", "3D compass data"),
+        # Current Time Service (0x1805)
+        "2a2b": ("Current Time", "Current date/time"),
+        "2a0f": ("Local Time Information", "Timezone and DST info"),
+        "2a14": ("Reference Time Information", "Time accuracy info"),
+        # Location and Navigation (0x1819)
+        "2a67": ("Location and Speed", "GPS location and speed"),
+        "2a68": ("Navigation", "Navigation data"),
+        "2a6a": ("LN Feature", "Location/Navigation features"),
+        "2a6b": ("LN Control Point", "Location/Navigation control"),
+        # Scan Parameters (0x1813)
+        "2a4f": ("Scan Interval Window", "BLE scan parameters"),
+        "2a31": ("Scan Refresh", "Scan refresh value"),
+        # Alert Notification Service (0x1811)
+        "2a44": ("Alert Notification Control Point", "Alert control"),
+        "2a46": ("New Alert", "New alert notification"),
+        "2a47": ("Supported New Alert Category", "Alert categories supported"),
+        "2a48": ("Supported Unread Alert Category", "Unread categories supported"),
+        "2a45": ("Unread Alert Status", "Unread alert count"),
+        # Phone Alert Status (0x180E)
+        "2a3f": ("Alert Status", "Phone alert status (silent, vibrate, etc)"),
+        "2a40": ("Ringer Control Point", "Control phone ringer"),
+        "2a41": ("Ringer Setting", "Current ringer setting"),
+        # Immediate Alert (0x1802)
+        "2a06": ("Alert Level", "Alert level (none, mild, high)"),
+        # Tx Power (0x1804)
+        "2a07": ("Tx Power Level", "Transmit power level in dBm"),
+        # Link Loss (0x1803)
+        # Uses 2a06 (Alert Level)
     }
 
     # Vendor-specific 128-bit characteristic UUIDs (common ones from various manufacturers)
@@ -4520,8 +4773,8 @@ async def command_ble_info(args: argparse.Namespace):
                           "tracker", "fit", "garmin", "fitbit"]
         keyboard_keywords = ["keyboard", "keys", "keeb", "mechanical"]
         mouse_keywords = ["mouse", "trackpad", "trackball", "pointing"]
-        phone_keywords = ["phone", "mobile",
-                          "iphone", "android", "pixel", "galaxy"]
+        phone_keywords = ["phone", "mobile", "samsung",
+                          "iphone", "android", "pixel", "galaxy", "oneplus", "xiaomi", "huawei"]
         tv_keywords = ["tv", "television", "roku",
                        "firestick", "chromecast", "appletv"]
 
@@ -4568,10 +4821,24 @@ async def command_ble_info(args: argparse.Namespace):
                 break
 
         # Check services for device type hints
+        # Phone services take priority - these are definitive indicators
+        phone_service_uuids = [
+            "184c",  # Generic Telephone Bearer
+            "184e",  # Audio Stream Control
+            "1855",  # Telephony and Media Audio (TMAP)
+        ]
+        phone_service_names = ["telephone", "telephony", "call", "phone"]
+
+        has_phone_service = False
         for service_uuid, service_name, service_icon, _ in services_found:
-            if "Audio" in service_name or "Handsfree" in service_name or "A2DP" in service_name:
-                if "🔊 Bluetooth Speaker/Audio" not in device_types and "🔊 Audio Device (by manufacturer)" not in device_types:
-                    device_types.append("🔊 Audio Device")
+            uuid_lower = str(service_uuid).lower()
+            name_lower = service_name.lower()
+
+            # Check for phone-specific services FIRST
+            if any(ps in uuid_lower for ps in phone_service_uuids) or any(pn in name_lower for pn in phone_service_names):
+                has_phone_service = True
+
+            # Only classify as audio device if it's purely audio (no phone services)
             if "HID" in service_name:
                 if "🎮 Input Device (HID)" not in device_types:
                     device_types.append("🎮 Input Device (HID)")
@@ -4579,6 +4846,18 @@ async def command_ble_info(args: argparse.Namespace):
                 device_types.append("❤️ Fitness/Health Device")
             if "AirPods" in service_name or "apple" in service_name.lower():
                 device_types.append("🎧 Apple AirPods")
+
+        # Add phone type if phone services detected (takes priority over audio)
+        if has_phone_service:
+            if "📱 Mobile Phone" not in device_types:
+                device_types.append("📱 Mobile Phone")
+        else:
+            # Only classify as audio device if NO phone services present
+            for service_uuid, service_name, service_icon, _ in services_found:
+                if "Audio" in service_name or "Handsfree" in service_name or "A2DP" in service_name:
+                    if "🔊 Bluetooth Speaker/Audio" not in device_types and "🔊 Audio Device (by manufacturer)" not in device_types:
+                        device_types.append("🔊 Audio Device")
+                    break
 
         # Check appearance for device type
         if "headphone" in appearance_name or "headset" in appearance_name:
@@ -4605,9 +4884,13 @@ async def command_ble_info(args: argparse.Namespace):
 
         # Print Services FIRST
         print_header(f"GATT SERVICES ({len(services_found)} found)")
+        print(f"  \033[1;33m📖 Reading all readable characteristics...\033[0m\n")
 
         # Track unknown characteristics for research guidance
         unknown_characteristics = []
+
+        # Store all read values for comprehensive summary
+        all_read_values = []
 
         for service_uuid, service_name, service_icon, service in services_found:
             # Show full UUID for standard services as 0xXXXX, or full 128-bit for custom
@@ -4622,10 +4905,12 @@ async def command_ble_info(args: argparse.Namespace):
 
             for char in service.characteristics:
                 props = []
+                can_read = False
                 if char.properties & 0x01:
                     props.append("Broadcast")
                 if char.properties & 0x02:
                     props.append("Read")
+                    can_read = True
                 if char.properties & 0x04:
                     props.append("WriteNoResp")
                 if char.properties & 0x08:
@@ -4646,6 +4931,7 @@ async def command_ble_info(args: argparse.Namespace):
                 char_desc = None
                 char_vendor = None
                 is_standard_char = False
+                short_id = None
 
                 # Check standard Bluetooth SIG characteristics
                 # Handle both full UUID format and Bumble's short format (uuid-16:XXXX)
@@ -4695,6 +4981,37 @@ async def command_ble_info(args: argparse.Namespace):
                     unknown_characteristics.append(
                         (char_uuid, props, service_name))
 
+                # Read and display value if --read-all is specified and characteristic is readable
+                # Always read readable characteristics for comprehensive enumeration
+                if can_read:
+                    try:
+                        value = await asyncio.wait_for(peer.read_value(char), timeout=5.0)
+                        if value:
+                            # Format the value based on characteristic type
+                            formatted_value = format_characteristic_value(
+                                short_id, char_name, value, APPEARANCES)
+                            print(
+                                f"         \033[1;36m→ Value:\033[0m {formatted_value}")
+                            all_read_values.append(
+                                (char_name or display_char_uuid, short_id, service_name, formatted_value, value))
+                    except asyncio.TimeoutError:
+                        print(f"         \033[0;90m→ Read timeout\033[0m")
+                    except Exception as e:
+                        err_str = str(e)
+                        if "INSUFFICIENT_AUTHENTICATION" in err_str or "AUTHENTICATION" in err_str:
+                            print(
+                                f"         \033[0;33m→ Requires authentication/pairing\033[0m")
+                        elif "INSUFFICIENT_ENCRYPTION" in err_str or "ENCRYPTION" in err_str:
+                            print(
+                                f"         \033[0;33m→ Requires encryption\033[0m")
+                        elif "READ_NOT_PERMITTED" in err_str:
+                            print(
+                                f"         \033[0;90m→ Read not permitted\033[0m")
+                        else:
+                            logging.debug(f"Read failed for {char_uuid}: {e}")
+                            print(
+                                f"         \033[0;90m→ Read failed: {err_str[:50]}\033[0m")
+
         # Show unknown characteristics count
         if unknown_characteristics:
             print(
@@ -4725,44 +5042,299 @@ async def command_ble_info(args: argparse.Namespace):
                 for uuid, _, _ in unknown_characteristics[:3]:
                     print(f"    → Google: \"{uuid}\"")
 
-        # Print Device Information at the end (after all checks)
+        # Build comprehensive device summary from all read values
         print_header("DEVICE SUMMARY")
-        print_field("Address", target_address)
-        print_field("Device Type", ", ".join(set(device_types)))
-        print_field("Name", device_info["name"])
-        if device_info["appearance"]:
+
+        # Create a lookup dict from all_read_values for easy access
+        # all_read_values format: (char_name, short_id, service_name, formatted_value, raw_value)
+        read_values_by_id = {}
+        read_values_by_name = {}
+        for char_name, short_id, service_name, formatted_value, raw_value in all_read_values:
+            if short_id:
+                read_values_by_id[short_id.lower()] = (
+                    char_name, formatted_value, raw_value)
+            if char_name:
+                read_values_by_name[char_name] = (formatted_value, raw_value)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # BASIC DEVICE IDENTITY
+        # ═══════════════════════════════════════════════════════════════════
+        print(
+            f"\n  \033[1;35m┌─ DEVICE IDENTITY ─────────────────────────────────────────┐\033[0m")
+        print_field("Address", target_address, indent=4)
+        print_field("Device Type", ", ".join(set(device_types)), indent=4)
+
+        # Get name from read values or device_info
+        name = read_values_by_id.get(
+            "2a00", (None, device_info.get("name"), None))[1]
+        if name and name.startswith('"') and name.endswith('"'):
+            name = name[1:-1]  # Remove quotes
+        print_field("Name", name, indent=4)
+
+        # Appearance
+        if device_info.get("appearance"):
             print_field(
-                "Appearance", f"{device_info['appearance_name']} ({device_info['appearance']})")
-        print_field("Manufacturer", device_info["manufacturer"])
-        print_field("Model", device_info["model"])
-        print_field("Serial Number", device_info["serial"])
-        print_field("Firmware Rev", device_info["firmware"])
-        print_field("Hardware Rev", device_info["hardware"])
-        print_field("Software Rev", device_info["software"])
-        if device_info["battery"] is not None:
-            battery_bar = "█" * \
-                (device_info["battery"] // 10) + "░" * \
-                (10 - device_info["battery"] // 10)
-            print_field(
-                "Battery", f"{device_info['battery']}% [{battery_bar}]")
-        if device_info.get("battery_state") is not None:
-            state_val = device_info["battery_state"]
-            # Decode battery power state flags
-            states = []
-            if state_val & 0x01:
-                states.append("Present")
-            if state_val & 0x02:
-                states.append("Discharging")
-            if state_val & 0x04:
-                states.append("Charging")
-            if state_val & 0x08:
-                states.append("Critical")
-            print_field("Battery State", ", ".join(states)
-                        if states else f"0x{state_val:02X}")
-        print_field("Total Services", len(services_found))
+                "Appearance", f"{device_info['appearance_name']} ({device_info['appearance']})", indent=4)
+
+        # Manufacturer, Model, Serial from Device Information Service
+        manufacturer = read_values_by_id.get(
+            "2a29", (None, device_info.get("manufacturer"), None))[1]
+        if manufacturer and manufacturer.startswith('"'):
+            manufacturer = manufacturer[1:-1]
+        print_field("Manufacturer", manufacturer, indent=4)
+
+        model = read_values_by_id.get(
+            "2a24", (None, device_info.get("model"), None))[1]
+        if model and model.startswith('"'):
+            model = model[1:-1]
+        print_field("Model", model, indent=4)
+
+        serial = read_values_by_id.get(
+            "2a25", (None, device_info.get("serial"), None))[1]
+        if serial and serial.startswith('"'):
+            serial = serial[1:-1]
+        print_field("Serial Number", serial, indent=4)
+
+        # Version information
+        firmware = read_values_by_id.get(
+            "2a26", (None, device_info.get("firmware"), None))[1]
+        if firmware and firmware.startswith('"'):
+            firmware = firmware[1:-1]
+        print_field("Firmware", firmware, indent=4)
+
+        hardware = read_values_by_id.get(
+            "2a27", (None, device_info.get("hardware"), None))[1]
+        if hardware and hardware.startswith('"'):
+            hardware = hardware[1:-1]
+        print_field("Hardware", hardware, indent=4)
+
+        software = read_values_by_id.get(
+            "2a28", (None, device_info.get("software"), None))[1]
+        if software and software.startswith('"'):
+            software = software[1:-1]
+        print_field("Software", software, indent=4)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # BATTERY STATUS
+        # ═══════════════════════════════════════════════════════════════════
+        battery_level = read_values_by_id.get("2a19")
+        if battery_level or device_info.get("battery") is not None:
+            print(
+                f"\n  \033[1;35m┌─ BATTERY STATUS ──────────────────────────────────────────┐\033[0m")
+            if battery_level:
+                level_str = battery_level[1]
+                if level_str.endswith('%'):
+                    try:
+                        pct = int(level_str.rstrip('%'))
+                        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                        print_field("Battery Level",
+                                    f"{pct}% [{bar}]", indent=4)
+                    except:
+                        print_field("Battery Level", level_str, indent=4)
+                else:
+                    print_field("Battery Level", level_str, indent=4)
+            elif device_info.get("battery") is not None:
+                pct = device_info["battery"]
+                bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                print_field("Battery Level", f"{pct}% [{bar}]", indent=4)
+
+            if device_info.get("battery_state") is not None:
+                state_val = device_info["battery_state"]
+                states = []
+                if state_val & 0x01:
+                    states.append("Present")
+                if state_val & 0x02:
+                    states.append("Discharging")
+                if state_val & 0x04:
+                    states.append("Charging")
+                if state_val & 0x08:
+                    states.append("Critical")
+                print_field("Battery State", ", ".join(states)
+                            if states else f"0x{state_val:02X}", indent=4)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # TELEPHONY INFORMATION (from Generic Telephone Bearer Service)
+        # ═══════════════════════════════════════════════════════════════════
+        telephony_chars = ["2bb3", "2bb4", "2bb5", "2bb6",
+                           "2bb9", "2bbd", "2bbb", "2bc1", "2bc2"]
+        has_telephony = any(
+            cid in read_values_by_id for cid in telephony_chars)
+
+        if has_telephony:
+            print(
+                f"\n  \033[1;35m┌─ TELEPHONY (Phone/Carrier) ───────────────────────────────┐\033[0m")
+
+            # Bearer Provider Name (carrier)
+            if "2bb3" in read_values_by_id:
+                carrier = read_values_by_id["2bb3"][1]
+                if carrier.startswith('"'):
+                    carrier = carrier[1:-1]
+                print_field("Carrier/Provider", carrier, indent=4)
+
+            # Bearer UCI
+            if "2bb4" in read_values_by_id:
+                uci = read_values_by_id["2bb4"][1]
+                if uci.startswith('"'):
+                    uci = uci[1:-1]
+                print_field("Bearer UCI", uci, indent=4)
+
+            # Bearer Technology (network type)
+            if "2bb5" in read_values_by_id:
+                print_field("Network Technology",
+                            read_values_by_id["2bb5"][1], indent=4)
+
+            # URI Schemes
+            if "2bb6" in read_values_by_id:
+                schemes = read_values_by_id["2bb6"][1]
+                if schemes.startswith('"'):
+                    schemes = schemes[1:-1]
+                print_field("URI Schemes", schemes, indent=4)
+
+            # Call State
+            if "2bbd" in read_values_by_id:
+                print_field(
+                    "Call State", read_values_by_id["2bbd"][1], indent=4)
+
+            # Status Flags
+            if "2bbb" in read_values_by_id:
+                print_field("Status Flags",
+                            read_values_by_id["2bbb"][1], indent=4)
+
+            # Current Calls
+            if "2bb9" in read_values_by_id:
+                print_field("Current Calls",
+                            read_values_by_id["2bb9"][1], indent=4)
+
+            # Incoming Call
+            if "2bc1" in read_values_by_id:
+                print_field("Incoming Call",
+                            read_values_by_id["2bc1"][1], indent=4)
+
+            # Call Friendly Name (caller ID)
+            if "2bc2" in read_values_by_id:
+                caller = read_values_by_id["2bc2"][1]
+                if caller.startswith('"'):
+                    caller = caller[1:-1]
+                print_field("Caller Name", caller, indent=4)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # MEDIA INFORMATION (from Generic Media Control Service)
+        # ═══════════════════════════════════════════════════════════════════
+        media_chars = ["2b93", "2b97", "2b98", "2b99", "2b9a", "2ba1", "2ba3"]
+        has_media = any(cid in read_values_by_id for cid in media_chars)
+
+        if has_media:
+            print(
+                f"\n  \033[1;35m┌─ MEDIA PLAYBACK ──────────────────────────────────────────┐\033[0m")
+
+            # Media Player Name
+            if "2b93" in read_values_by_id:
+                player = read_values_by_id["2b93"][1]
+                if player.startswith('"'):
+                    player = player[1:-1]
+                print_field("Media Player", player, indent=4)
+
+            # Media State
+            if "2ba3" in read_values_by_id:
+                print_field("Playback State",
+                            read_values_by_id["2ba3"][1], indent=4)
+
+            # Track Title
+            if "2b97" in read_values_by_id:
+                title = read_values_by_id["2b97"][1]
+                if title.startswith('"'):
+                    title = title[1:-1]
+                print_field("Track Title", title, indent=4)
+
+            # Track Duration
+            if "2b98" in read_values_by_id:
+                print_field("Track Duration",
+                            read_values_by_id["2b98"][1], indent=4)
+
+            # Track Position
+            if "2b99" in read_values_by_id:
+                print_field("Track Position",
+                            read_values_by_id["2b99"][1], indent=4)
+
+            # Playback Speed
+            if "2b9a" in read_values_by_id:
+                print_field("Playback Speed",
+                            read_values_by_id["2b9a"][1], indent=4)
+
+            # Playing Order
+            if "2ba1" in read_values_by_id:
+                print_field("Playing Order",
+                            read_values_by_id["2ba1"][1], indent=4)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # AUDIO CAPABILITIES (from TMAP, Volume Control, etc.)
+        # ═══════════════════════════════════════════════════════════════════
+        audio_chars = ["2b51", "2b7d", "2bc3", "2bba"]
+        has_audio = any(cid in read_values_by_id for cid in audio_chars)
+
+        if has_audio:
+            print(
+                f"\n  \033[1;35m┌─ AUDIO CAPABILITIES ──────────────────────────────────────┐\033[0m")
+
+            # TMAP Role
+            if "2b51" in read_values_by_id:
+                print_field(
+                    "TMAP Role", read_values_by_id["2b51"][1], indent=4)
+
+            # Volume State
+            if "2b7d" in read_values_by_id:
+                print_field("Volume State",
+                            read_values_by_id["2b7d"][1], indent=4)
+
+            # Microphone Mute
+            if "2bc3" in read_values_by_id:
+                print_field("Microphone Mute",
+                            read_values_by_id["2bc3"][1], indent=4)
+
+            # Content Control ID
+            if "2bba" in read_values_by_id:
+                print_field("Content Control ID",
+                            read_values_by_id["2bba"][1], indent=4)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ALL OTHER READABLE VALUES (grouped by service)
+        # ═══════════════════════════════════════════════════════════════════
+        # Collect values we haven't already displayed
+        displayed_ids = {
+            "2a00", "2a01", "2a24", "2a25", "2a26", "2a27", "2a28", "2a29",  # Device Info
+            "2a19", "2a1a",  # Battery
+            "2bb3", "2bb4", "2bb5", "2bb6", "2bb9", "2bbd", "2bbb", "2bc1", "2bc2",  # Telephony
+            "2b93", "2b97", "2b98", "2b99", "2b9a", "2ba1", "2ba3",  # Media
+            "2b51", "2b7d", "2bc3", "2bba",  # Audio
+        }
+
+        # Group remaining values by service
+        from collections import defaultdict
+        other_values = defaultdict(list)
+        for char_name, short_id, service_name, formatted_value, raw_value in all_read_values:
+            if short_id and short_id.lower() in displayed_ids:
+                continue
+            other_values[service_name].append((char_name, formatted_value))
+
+        if other_values:
+            print(
+                f"\n  \033[1;35m┌─ ADDITIONAL CHARACTERISTICS ──────────────────────────────┐\033[0m")
+            for service_name, values in other_values.items():
+                print(f"    \033[1;32m{service_name}\033[0m")
+                for char_name, formatted_value in values:
+                    print_field(char_name, formatted_value, indent=6)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ENUMERATION STATISTICS
+        # ═══════════════════════════════════════════════════════════════════
+        print(
+            f"\n  \033[1;35m┌─ ENUMERATION STATISTICS ──────────────────────────────────┐\033[0m")
+        print_field("Total Services", len(services_found), indent=4)
+        print_field("Characteristics Read", len(all_read_values), indent=4)
         print_field("Unknown Characteristics", len(
-            unknown_characteristics) if unknown_characteristics else "None")
-        print_field("Connection Status", "\033[1;32mConnected\033[0m")
+            unknown_characteristics) if unknown_characteristics else "0", indent=4)
+        print_field("Connection Status",
+                    "\033[1;32mConnected\033[0m", indent=4)
 
         print(f"\n\033[1;36m{'═' * term_width}\033[0m\n")
 
