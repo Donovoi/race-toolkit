@@ -1419,10 +1419,10 @@ async def command_check(args: argparse.Namespace):
 
                         try:
                             uuid_found = await asyncio.wait_for(
-                                le_checker.check_UUIDs(addr), timeout=30.0)
+                                le_checker.check_UUIDs(addr), timeout=10.0)
                         except asyncio.TimeoutError:
                             logging.warning(
-                                "Connection timed out after 30 seconds. Device may be unavailable or out of range."
+                                "Connection timed out after 10 seconds. Device may be unavailable or out of range."
                             )
                             uuid_found = False
                         except asyncio.CancelledError:
@@ -2632,6 +2632,342 @@ async def lookup_oui_vendor(mac_address: str) -> dict:
     return result
 
 
+# Known BLE specifications database - maps UUIDs to their documented purpose
+KNOWN_BLE_SPECIFICATIONS = {
+    # DULT (Detecting Unwanted Location Trackers) - IETF Draft
+    "15190001-12f4-c226-88ed-2ac5579f2a85": {
+        "name": "DULT Non-Owner Service",
+        "description": "Accessory non-owner service for unwanted tracker detection",
+        "spec": "IETF Draft: Detecting Unwanted Location Trackers",
+        "url": "https://www.ietf.org/archive/id/draft-detecting-unwanted-location-trackers-01.html",
+        "section": "3.10 Accessory Connections"
+    },
+    "8e0c0001-1d68-fb92-bf61-48377421680e": {
+        "name": "DULT Non-Owner Characteristic",
+        "description": "Accessory non-owner characteristic for unwanted tracker detection",
+        "spec": "IETF Draft: Detecting Unwanted Location Trackers",
+        "url": "https://www.ietf.org/archive/id/draft-detecting-unwanted-location-trackers-01.html",
+        "section": "3.10 Accessory Connections"
+    },
+    # Google Fast Pair - Extended characteristics
+    "fe2c1233-8366-4814-8eb0-01de32100bea": {
+        "name": "Fast Pair Firmware Revision",
+        "description": "Returns device firmware revision string",
+        "spec": "Google Fast Pair Specification",
+        "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
+    },
+    "fe2c1238-8366-4814-8eb0-01de32100bea": {
+        "name": "Fast Pair Additional Data",
+        "description": "Additional data characteristic for Fast Pair",
+        "spec": "Google Fast Pair Specification",
+        "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
+    },
+    "fe2c1239-8366-4814-8eb0-01de32100bea": {
+        "name": "Fast Pair Model ID (Readable)",
+        "description": "Readable model ID for Fast Pair devices",
+        "spec": "Google Fast Pair Specification",
+        "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
+    },
+    "fe2c123a-8366-4814-8eb0-01de32100bea": {
+        "name": "Fast Pair Data Characteristic",
+        "description": "Fast Pair data exchange characteristic",
+        "spec": "Google Fast Pair Specification",
+        "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
+    },
+    "fe2c123b-8366-4814-8eb0-01de32100bea": {
+        "name": "Fast Pair Beacon Actions",
+        "description": "Beacon actions characteristic for Fast Pair",
+        "spec": "Google Fast Pair Specification",
+        "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
+    },
+    # Sony Audio Services (5b833eXX base pattern)
+    "5b833e06-6bc7-4802-8e9a-723ceca4bd8f": {
+        "name": "Sony Audio Control Service",
+        "description": "Sony proprietary audio control (write commands, receive notifications)",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "5b833e26-6bc7-4802-8e9a-723ceca4bd8f": {
+        "name": "Sony Audio Status Service",
+        "description": "Sony proprietary audio status (ANC, EQ, codec settings)",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "5b833e27-6bc7-4802-8e9a-723ceca4bd8f": {
+        "name": "Sony Device Info Service",
+        "description": "Sony proprietary device information service",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    # Sony Audio Characteristics (5b833cXX base pattern)
+    "5b833c10-6bc7-4802-8e9a-723ceca4bd8f": {
+        "name": "Sony Command Write",
+        "description": "Write commands to control headphones (ANC, EQ, etc.)",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "5b833c11-6bc7-4802-8e9a-723ceca4bd8f": {
+        "name": "Sony Status Write",
+        "description": "Write status/configuration changes",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "5b833c12-6bc7-4802-8e9a-723ceca4bd8f": {
+        "name": "Sony Command Notify",
+        "description": "Receive notifications for command responses",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "5b833c13-6bc7-4802-8e9a-723ceca4bd8f": {
+        "name": "Sony Status Notify",
+        "description": "Receive status change notifications",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "5b833c1b-6bc7-4802-8e9a-723ceca4bd8f": {
+        "name": "Sony Extended Notify 1",
+        "description": "Extended notification channel (battery, etc.)",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "5b833c1c-6bc7-4802-8e9a-723ceca4bd8f": {
+        "name": "Sony Extended Write",
+        "description": "Extended write channel for advanced settings",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "5b833c68-6bc7-4802-8e9a-723ceca4bd8f": {
+        "name": "Sony Device ID",
+        "description": "Device identifier/serial number readable characteristic",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    # Sony Extended Audio (f76acbXX base pattern - newer firmware)
+    "f76acb00-7cab-495f-bb1a-e664598fd77f": {
+        "name": "Sony Extended Audio Service",
+        "description": "Sony extended audio service (newer WH-1000XM series)",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "f76acb01-7cab-495f-bb1a-e664598fd77f": {
+        "name": "Sony Extended Command Write",
+        "description": "Extended command write characteristic",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": None
+    },
+    "f76acb02-7cab-495f-bb1a-e664598fd77f": {
+        "name": "Sony Extended Notify 1",
+        "description": "Extended notification characteristic 1",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": None
+    },
+    "f76acb03-7cab-495f-bb1a-e664598fd77f": {
+        "name": "Sony Extended Notify 2",
+        "description": "Extended notification characteristic 2",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": None
+    },
+    "f76acb04-7cab-495f-bb1a-e664598fd77f": {
+        "name": "Sony Extended Command Write 2",
+        "description": "Secondary command write characteristic",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": None
+    },
+    "f76acb05-7cab-495f-bb1a-e664598fd77f": {
+        "name": "Sony Extended Notify 3",
+        "description": "Extended notification characteristic 3",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": None
+    },
+    "f76acb06-7cab-495f-bb1a-e664598fd77f": {
+        "name": "Sony Extended Notify 4",
+        "description": "Extended notification characteristic 4",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": None
+    },
+    "f76acb07-7cab-495f-bb1a-e664598fd77f": {
+        "name": "Sony Extended Command Write 3",
+        "description": "Tertiary command write characteristic",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": None
+    },
+    "f76acb08-7cab-495f-bb1a-e664598fd77f": {
+        "name": "Sony Extended Notify 5",
+        "description": "Extended notification characteristic 5",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": None
+    },
+    "f76acb09-7cab-495f-bb1a-e664598fd77f": {
+        "name": "Sony Extended Notify 6",
+        "description": "Extended notification characteristic 6",
+        "spec": "Sony Headphones SDK (proprietary)",
+        "url": None
+    },
+    # Other common vendor characteristics
+    "45c93e07-d90d-4b93-a9db-91e5dd734e35": {
+        "name": "Audio Codec Control Service",
+        "description": "Audio codec configuration service (LDAC, AAC, SBC selection)",
+        "spec": "Vendor Audio SDK",
+        "url": None
+    },
+    "45c93c15-d90d-4b93-a9db-91e5dd734e35": {
+        "name": "Codec Control Write",
+        "description": "Write codec settings and preferences",
+        "spec": "Vendor Audio SDK",
+        "url": None
+    },
+    "45c93c16-d90d-4b93-a9db-91e5dd734e35": {
+        "name": "Codec Status Notify",
+        "description": "Codec status change notifications",
+        "spec": "Vendor Audio SDK",
+        "url": None
+    },
+    "45c93c17-d90d-4b93-a9db-91e5dd734e35": {
+        "name": "Codec Info Notify",
+        "description": "Current codec information notifications",
+        "spec": "Vendor Audio SDK",
+        "url": None
+    },
+    "76c13020-fe8f-416a-b4c3-ee59d3ef95dc": {
+        "name": "OTA Update Service",
+        "description": "Over-the-air firmware update service",
+        "spec": "Vendor OTA Protocol",
+        "url": None
+    },
+    "76c13021-fe8f-416a-b4c3-ee59d3ef95dc": {
+        "name": "OTA Control Write",
+        "description": "Write OTA update commands",
+        "spec": "Vendor OTA Protocol",
+        "url": None
+    },
+    "76c13022-fe8f-416a-b4c3-ee59d3ef95dc": {
+        "name": "OTA Status Read",
+        "description": "Read OTA update status",
+        "spec": "Vendor OTA Protocol",
+        "url": None
+    },
+    "dc405470-a351-4a59-97d8-2e2e3b207fbb": {
+        "name": "Spatial Audio Service",
+        "description": "Spatial/3D audio and head tracking service",
+        "spec": "Vendor Spatial Audio SDK",
+        "url": None
+    },
+    "bfd869fa-a3f2-4c2f-bcff-3eb1ec80cead": {
+        "name": "Spatial Audio Write",
+        "description": "Write spatial audio settings (head tracking, etc.)",
+        "spec": "Vendor Spatial Audio SDK",
+        "url": None
+    },
+    "2a6b6575-faf6-418c-923f-ccd63a56d955": {
+        "name": "Spatial Audio Notify",
+        "description": "Spatial audio state notifications",
+        "spec": "Vendor Spatial Audio SDK",
+        "url": None
+    },
+    "11c8b310-80e4-4276-afc0-f81590b2177f": {
+        "name": "LE Audio Control Service",
+        "description": "Bluetooth LE Audio control service",
+        "spec": "Bluetooth LE Audio",
+        "url": "https://www.bluetooth.com/specifications/le-audio/"
+    },
+    "28bc862f-87d2-457b-b45a-5c838c4a66ff": {
+        "name": "Vendor Extended Control",
+        "description": "Vendor-specific extended control service",
+        "spec": "Vendor SDK",
+        "url": None
+    },
+    "d614da49-46db-4edb-8cea-62d6435f3156": {
+        "name": "Vendor Extended Control Char",
+        "description": "Vendor-specific extended control characteristic",
+        "spec": "Vendor SDK",
+        "url": None
+    }
+}
+
+
+async def search_web_for_uuid(uuid: str) -> dict:
+    """Search the web for information about a UUID using DuckDuckGo.
+
+    Args:
+        uuid: The UUID to search for
+
+    Returns:
+        Dictionary with search result or None
+    """
+    import urllib.request
+    import urllib.parse
+    import re
+
+    uuid_lower = uuid.lower()
+
+    # First check our known specifications database
+    if uuid_lower in KNOWN_BLE_SPECIFICATIONS:
+        spec = KNOWN_BLE_SPECIFICATIONS[uuid_lower]
+        return {
+            "name": spec["name"],
+            "description": spec["description"],
+            "spec": spec["spec"],
+            "url": spec.get("url"),
+            "source": "Known BLE Specifications"
+        }
+
+    # Try DuckDuckGo HTML search (no API key needed)
+    try:
+        # Search for the UUID in quotes
+        query = urllib.parse.quote(f'"{uuid}"')
+        url = f"https://html.duckduckgo.com/html/?q={query}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html = response.read().decode('utf-8', errors='ignore')
+
+            # Extract result snippets
+            # DuckDuckGo HTML results are in <a class="result__a"> tags
+            results = []
+
+            # Find result titles and URLs
+            title_pattern = r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>'
+            snippet_pattern = r'<a[^>]*class="result__snippet"[^>]*>([^<]*)</a>'
+
+            titles = re.findall(title_pattern, html, re.IGNORECASE)
+            snippets = re.findall(snippet_pattern, html, re.IGNORECASE)
+
+            for i, (result_url, title) in enumerate(titles[:3]):
+                # Decode DuckDuckGo redirect URL
+                if 'uddg=' in result_url:
+                    actual_url = urllib.parse.unquote(
+                        result_url.split('uddg=')[-1].split('&')[0])
+                else:
+                    actual_url = result_url
+
+                snippet = snippets[i] if i < len(snippets) else ""
+
+                # Clean up HTML entities
+                title = title.replace('&amp;', '&').replace(
+                    '&lt;', '<').replace('&gt;', '>')
+                snippet = snippet.replace('&amp;', '&').replace(
+                    '&lt;', '<').replace('&gt;', '>')
+
+                # Skip if it's just a UUID listing without context
+                if title and uuid.lower() not in title.lower():
+                    results.append({
+                        "title": title.strip(),
+                        "url": actual_url,
+                        "snippet": snippet.strip()[:200] if snippet else None
+                    })
+
+            if results:
+                return {
+                    "web_results": results,
+                    "source": "DuckDuckGo Search"
+                }
+    except Exception:
+        pass
+
+    return {}
+
+
 async def search_uuid_github(uuid: str) -> list:
     """Search GitHub for information about a UUID.
 
@@ -2799,7 +3135,9 @@ async def research_unknown_characteristics(unknown_chars: list, mac_address: str
         "pattern_analysis": None,
         "uuid_findings": {},
         "github_results": {},
-        "nordic_results": {}
+        "nordic_results": {},
+        "web_results": {},
+        "known_specs": {}
     }
 
     # Lookup OUI vendor
@@ -2833,6 +3171,32 @@ async def research_unknown_characteristics(unknown_chars: list, mac_address: str
             if results:
                 research["github_results"][uuid] = results
             await asyncio.sleep(0.5)  # Rate limit
+
+    # Search known BLE specifications and web for ALL UUIDs
+    print(f"  \033[1;36m⟳ Searching known BLE specifications and web...\033[0m")
+    search_count = 0
+    for uuid, props, svc in unknown_chars:
+        uuid_lower = uuid.lower()
+
+        # Skip if already found in Nordic or GitHub
+        if uuid in research["nordic_results"] or uuid in research["github_results"]:
+            continue
+
+        # Check known specifications first (instant, no network)
+        if uuid_lower in KNOWN_BLE_SPECIFICATIONS:
+            research["known_specs"][uuid] = KNOWN_BLE_SPECIFICATIONS[uuid_lower]
+            continue
+
+        # Limit web searches to avoid rate limits (first 10 unfound)
+        if search_count < 10:
+            result = await search_web_for_uuid(uuid)
+            if result:
+                if result.get("source") == "Known BLE Specifications":
+                    research["known_specs"][uuid] = result
+                else:
+                    research["web_results"][uuid] = result
+            search_count += 1
+            await asyncio.sleep(0.3)  # Rate limit web searches
 
     return research
 
@@ -2905,6 +3269,41 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
             print(f"       UUID: {uuid}")
             print(f"       ID: {info.get('identifier', 'N/A')}")
 
+    # Known BLE Specifications Results
+    known_specs = research.get("known_specs", {})
+    if known_specs:
+        print(f"\n  \033[1;33m📖 KNOWN BLE SPECIFICATIONS\033[0m")
+        for uuid, info in known_specs.items():
+            print(f"     \033[1;32m✓ {info.get('name', 'Unknown')}\033[0m")
+            print(f"       UUID: \033[1;36m{uuid}\033[0m")
+            if info.get('description'):
+                print(f"       Description: {info['description']}")
+            if info.get('spec'):
+                print(f"       Specification: \033[0;33m{info['spec']}\033[0m")
+            if info.get('section'):
+                print(f"       Section: {info['section']}")
+            if info.get('url'):
+                print(f"       Reference: \033[0;36m{info['url']}\033[0m")
+
+    # Web Search Results
+    web_results = research.get("web_results", {})
+    if web_results:
+        print(f"\n  \033[1;33m🌐 WEB SEARCH RESULTS\033[0m")
+        for uuid, info in web_results.items():
+            if info.get("web_results"):
+                print(f"     UUID: \033[1;36m{uuid}\033[0m")
+                for i, result in enumerate(info["web_results"][:2], 1):
+                    print(
+                        f"       {i}. \033[1;32m{result.get('title', 'Unknown')}\033[0m")
+                    if result.get('url'):
+                        print(f"          \033[0;36m{result['url']}\033[0m")
+                    if result.get('snippet'):
+                        # Truncate long snippets
+                        snippet = result['snippet'][:100]
+                        if len(result['snippet']) > 100:
+                            snippet += "..."
+                        print(f"          \033[0;90m{snippet}\033[0m")
+
     # GitHub Results
     github = research.get("github_results", {})
     if github:
@@ -2931,11 +3330,30 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
     else:
         print(f"     1. Device may use a randomized MAC - check Device Information Service for vendor")
 
-    # Show the UUIDs formatted for searching
-    print(
-        f"\n     \033[0;90mSearch these UUIDs in Google (copy with quotes):\033[0m")
-    for uuid, props, svc in unknown_chars:
-        print(f"       \"{uuid}\"")
+    # Count how many UUIDs were identified
+    found_uuids = set()
+    found_uuids.update(research.get("nordic_results", {}).keys())
+    found_uuids.update(research.get("known_specs", {}).keys())
+    found_uuids.update(research.get("web_results", {}).keys())
+    found_uuids.update(research.get("github_results", {}).keys())
+
+    total_unknown = len(unknown_chars)
+    total_found = len(found_uuids)
+
+    if total_found > 0:
+        print(
+            f"\n  \033[1;32m✓ Identified {total_found}/{total_unknown} unknown characteristics automatically\033[0m")
+
+    # Show UUIDs that weren't found
+    unfound = [uuid for uuid, _, _ in unknown_chars if uuid not in found_uuids]
+
+    if unfound:
+        print(
+            f"\n     \033[0;90mNo results found for {len(unfound)} UUID(s) - search manually:\033[0m")
+        for uuid in unfound[:10]:  # Limit display
+            print(f"       \"{uuid}\"")
+        if len(unfound) > 10:
+            print(f"       ... and {len(unfound) - 10} more")
 
     # FCC lookup suggestion if we found a vendor
     if vendor:
@@ -2973,7 +3391,7 @@ async def command_ble_info(args: argparse.Namespace):
 
     controller = args.controller or "usb:0"
     target_address = args.target_address
-    timeout = getattr(args, 'timeout', 30.0)
+    timeout = getattr(args, 'timeout', 10.0)
 
     if not target_address:
         logging.error(
@@ -3826,7 +4244,7 @@ async def command_ble_speaker(args: argparse.Namespace):
     action = getattr(args, 'action', 'probe')
     char_uuid = getattr(args, 'char_uuid', None)
     write_data = getattr(args, 'write_data', None)
-    timeout = getattr(args, 'timeout', 30.0)
+    timeout = getattr(args, 'timeout', 10.0)
 
     if not target_address:
         logging.error("Target address required. Use --target-address")
@@ -4269,7 +4687,7 @@ async def command_avrcp(args: argparse.Namespace):
     action = getattr(args, 'action', 'info')
     repeat_count = getattr(args, 'repeat', 1)
     hold_time = getattr(args, 'hold_time', 0.1)
-    timeout = getattr(args, 'timeout', 30.0)
+    timeout = getattr(args, 'timeout', 10.0)
 
     if not target_address:
         logging.error("Target address required. Use --target-address")
@@ -4890,10 +5308,10 @@ async def command_hfp_demo(args: argparse.Namespace):
         checker.connection = await asyncio.wait_for(
             checker.device.connect(
                 target_address, transport=BT_BR_EDR_TRANSPORT),
-            timeout=30.0
+            timeout=10.0
         )
     except asyncio.TimeoutError:
-        logging.error("Connection timed out after 30 seconds.")
+        logging.error("Connection timed out after 10 seconds.")
         await checker.close()
         return
     except Exception as e:  # pylint: disable=broad-exception-caught
