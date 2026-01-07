@@ -193,6 +193,15 @@ class BumbleTransport(Transport):
         config.keystore = "JsonKeyStore"
         config.address = Address.generate_static_address()
         config.name = "BumbleRace"
+
+        # Optimize connection intervals for faster data transfer
+        if le:
+            # Faster LE connection parameters (7.5ms min, 30ms max interval)
+            config.le_connection_interval_min = 6  # 7.5ms units
+            config.le_connection_interval_max = 24  # 30ms units
+            config.le_connection_latency = 0  # No latency for responsive transfers
+            config.le_supervision_timeout = 500  # 5 second timeout
+
         self.device = Device.from_config_with_hci(
             config, self.t.source, self.t.sink)
         if classic:
@@ -280,22 +289,53 @@ class GATTBumbleChecker(BumbleTransport):
         rssi_dict = {}
 
         def on_adv(adv: Advertisement):
-            ln = adv.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
-            if not ln:
-                ln = adv.data.get(AdvertisingData.SHORT_LOCAL_NAME)
+            # Enhanced name extraction with better Bumble API compatibility
+            ln = None
+            try:
+                # Method 1: Try standard AD types (most reliable)
+                ln = adv.data.get(0x09)  # Complete Local Name (AD Type 0x09)
+                if not ln:
+                    # Shortened Local Name (AD Type 0x08)
+                    ln = adv.data.get(0x08)
+
+                # Method 2: Try Bumble constants (version-dependent)
+                if not ln and hasattr(AdvertisingData, 'COMPLETE_LOCAL_NAME'):
+                    ln = adv.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
+                if not ln and hasattr(AdvertisingData, 'SHORTENED_LOCAL_NAME'):
+                    ln = adv.data.get(AdvertisingData.SHORTENED_LOCAL_NAME)
+
+            except (AttributeError, KeyError, TypeError):
+                pass
+
+            # Ensure it's a string if we found a name
             if ln:
-                addr_str = str(adv.address)
-                if addr_str not in device_dict:
+                if isinstance(ln, bytes):
+                    ln = ln.decode('utf-8', errors='replace')
+
+            addr_str = str(adv.address)
+            if addr_str not in device_dict:
+                # Show cleaner format: if we have a name, show it; otherwise just address
+                if ln:
                     logging.info(
                         f"  Found: {addr_str}  {ln:<25}  RSSI: {adv.rssi}dBm")
-                device_dict[addr_str] = ln
-                rssi_dict[addr_str] = adv.rssi
+                else:
+                    logging.info(
+                        f"  Found: {addr_str:<43}  RSSI: {adv.rssi}dBm")
+            # Store name or None (not address as fallback)
+            device_dict[addr_str] = ln
+            rssi_dict[addr_str] = adv.rssi
 
         self.device.on("advertisement", on_adv)
 
         # Start scanning and do so for a defined number of seconds
+        # Use active scanning for faster discovery and scan response data
         logging.info("-" * 60)
-        await self.device.start_scanning(True, filter_duplicates=True)
+        await self.device.start_scanning(
+            active=True,  # Active scanning gets more device info
+            filter_duplicates=True,
+            scan_interval=96,  # 60ms (units of 0.625ms) - faster than default
+            scan_window=48     # 30ms duty cycle - good balance
+        )
         await asyncio.sleep(self.scan_time)
         self.device.remove_listener("advertisement", on_adv)
         await self.device.stop_scanning()
@@ -308,18 +348,33 @@ class GATTBumbleChecker(BumbleTransport):
                                  for addr, name in devices]
             devices_with_rssi.sort(key=lambda x: x[2], reverse=True)
 
-            logging.info("")
-            logging.info(f"Found {len(devices)} BLE device(s):")
-            logging.info("")
-            for i, (address, name, rssi) in enumerate(devices_with_rssi):
-                logging.info(f"  [{i}]: {name} ({address}) - RSSI: {rssi}dBm")
-            logging.info("  [X]: None of these devices is mine")
-            logging.info("")
+            # Print table header
+            print(f"\n\033[1;36m{'─' * 80}\033[0m")
+            print(f"\033[1;36m  FOUND {len(devices)} BLE DEVICE(S)\033[0m")
+            print(f"\033[1;36m{'─' * 80}\033[0m\n")
 
-            chosen = -1
-            logging.info(
-                "Which device is yours? Enter number [0-%d] or X: ", len(devices) - 1)
-            chosen = input("").strip()
+            # Column headers
+            print(f"  {'#':<4} {'NAME':<35} {'ADDRESS':<20} {'RSSI':>6}")
+            print(f"  {'-'*4} {'-'*35} {'-'*20} {'-'*6}")
+
+            # Print devices
+            for i, (address, name, rssi) in enumerate(devices_with_rssi):
+                # Format name: show "(Unknown)" if no name available
+                display_name = name if name else "(Unknown)"
+                # Truncate long names
+                if len(display_name) > 34:
+                    display_name = display_name[:31] + "..."
+
+                rssi_color = "\033[1;32m" if rssi > - \
+                    70 else "\033[0;33m" if rssi > -85 else "\033[0;90m"
+                print(
+                    f"  \033[1;36m[{i}]\033[0m  {display_name:<35} {address:<20} {rssi_color}{rssi:>4}dBm\033[0m")
+
+            print(f"  \033[1;36m[X]\033[0m  None of these devices is mine")
+            print(f"\n\033[1;36m{'─' * 80}\033[0m\n")
+
+            chosen = input(
+                "Which device is yours? Enter number [0-%d] or X: " % (len(devices) - 1)).strip()
             if chosen.lower() == "x":
                 logging.info("User chose to skip BLE device selection.")
                 return False
@@ -329,7 +384,7 @@ class GATTBumbleChecker(BumbleTransport):
                     if 0 <= chosen < len(devices_with_rssi):
                         selected = devices_with_rssi[chosen]
                         logging.info(
-                            f"Selected: {selected[1]} ({selected[0]})")
+                            f"Selected: {selected[1] if selected[1] else selected[0]} ({selected[0]})")
                         return (selected[0], selected[1])
                     else:
                         logging.error(
@@ -565,14 +620,23 @@ class GATTBumbleTransport(BumbleTransport):
 
         self.client = Peer(self.connection).gatt_client
 
-        mtu = await self.client.request_mtu(256)
-        logging.info(f"Negotiated GATT MTU to {mtu}.")
+        # Request maximum MTU for better throughput (512 is common max for many devices)
+        # Will negotiate down if device doesn't support it
+        try:
+            mtu = await self.client.request_mtu(512)
+            logging.info(f"Negotiated GATT MTU to {mtu}.")
+        except Exception as e:
+            logging.warning(f"MTU negotiation failed: {e}. Using default MTU.")
+            mtu = 23  # BLE minimum
 
+        # Discover only the services we need for faster connection
         await self.client.discover_services(
             [UuidTable.AIROHA_GATT_SERVICE_UUID, UuidTable.SONY_GATT_SERVICE_UUID]
         )
+        # Discover characteristics only for services we found (faster than all)
         for service in self.client.services:
-            await service.discover_characteristics()
+            if service.uuid in [UuidTable.AIROHA_GATT_SERVICE_UUID, UuidTable.SONY_GATT_SERVICE_UUID]:
+                await service.discover_characteristics()
 
         service_uuids = [s.uuid for s in self.client.services]
 
@@ -625,7 +689,16 @@ class GATTBumbleTransport(BumbleTransport):
         if not self.client:
             logging.error("No GATT client, cannot send.")
             return
-        await self.client.write_value(self.tx_char_handle, data, with_response=True)
+        # Use write without response when possible for better throughput
+        # Fall back to with_response if characteristic doesn't support it
+        try:
+            if hasattr(self.tx_char_handle, 'properties') and 'write-without-response' in self.tx_char_handle.properties:
+                await self.client.write_value(self.tx_char_handle, data, with_response=False)
+            else:
+                await self.client.write_value(self.tx_char_handle, data, with_response=True)
+        except Exception:
+            # Fallback to with_response if write-without-response fails
+            await self.client.write_value(self.tx_char_handle, data, with_response=True)
 
     def _recv_internal(self, data: bytes):
         if self.recv_fn:
@@ -653,23 +726,44 @@ class GATTBumbleTransport(BumbleTransport):
         logging.info("Scanning for BLE devices (timeout: %.0fs)...", timeout)
 
         device_dict = {}
+        rssi_dict = {}
 
         def on_adv(adv: Advertisement):
-            ln = adv.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
+            # Enhanced name extraction (same as scan_devices)
+            ln = None
+            try:
+                ln = adv.data.get(0x09) or adv.data.get(0x08)
+                if not ln and hasattr(AdvertisingData, 'COMPLETE_LOCAL_NAME'):
+                    ln = adv.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
+                if not ln and hasattr(AdvertisingData, 'SHORTENED_LOCAL_NAME'):
+                    ln = adv.data.get(AdvertisingData.SHORTENED_LOCAL_NAME)
+            except (AttributeError, KeyError, TypeError):
+                pass
+
             if ln:
+                if isinstance(ln, bytes):
+                    ln = ln.decode('utf-8', errors='replace')
+
                 # if we have a user-supplied list of devices, filter for them
                 if self.devices:
-                    # for some reason bumble seems to have LE_ prefixes while bleak doesn't
-                    # if ln in self.devices or ln.strip("LE_") in self.devices:
                     if self.matches(self.devices, ln):
-                        logging.info(f"Found device {ln} - {adv.address}")
+                        logging.info(
+                            f"Found device {ln} - {adv.address} (RSSI: {adv.rssi}dBm)")
                         device_dict[adv.address] = ln
+                        rssi_dict[adv.address] = adv.rssi
                 else:
                     device_dict[adv.address] = ln
+                    rssi_dict[adv.address] = adv.rssi
 
         self.device.on("advertisement", on_adv)
 
-        await self.device.start_scanning(True, filter_duplicates=True)
+        # Optimized scanning parameters (same as scan_devices)
+        await self.device.start_scanning(
+            active=True,
+            filter_duplicates=True,
+            scan_interval=96,  # 60ms
+            scan_window=48     # 30ms
+        )
 
         # Wait with timeout instead of infinite loop
         elapsed = 0.0
@@ -693,14 +787,21 @@ class GATTBumbleTransport(BumbleTransport):
                 address, name = devices[0]
                 return (address, name)
 
+            # Sort by RSSI (strongest first) for better UX
+            devices_with_rssi = [(addr, name, rssi_dict.get(addr, -999))
+                                 for addr, name in devices]
+            devices_with_rssi.sort(key=lambda x: x[2], reverse=True)
+
             logging.info(f"Found {len(devices)} matching devices:")
-            for i, (address, name) in enumerate(devices):
-                logging.info(f"[{i}]: {name} ({address})")
+            for i, (address, name, rssi) in enumerate(devices_with_rssi):
+                logging.info(f"[{i}]: {name} ({address}) - RSSI: {rssi}dBm")
 
             chosen = -1
-            while chosen >= len(devices) or chosen < 0:
+            while chosen >= len(devices_with_rssi) or chosen < 0:
                 chosen = int(input("Which one do you want to connect to?\n"))
-            return devices[chosen]
+            # Return from sorted list
+            selected = devices_with_rssi[chosen]
+            return (selected[0], selected[1])
 
         logging.warning("No target device found.")
         return None
