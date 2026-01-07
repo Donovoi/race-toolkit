@@ -1640,6 +1640,16 @@ async def command_check(args: argparse.Namespace):
 
     _print_vulnerability_summary(vulnerabilities, bdaddr, controller)
 
+    # Cleanup: Close any open Bumble connections
+    try:
+        if 'classic_checker' in locals() and classic_checker:
+            await classic_checker.close()
+    except Exception as e:
+        logging.debug("Error closing classic_checker: %s", e)
+
+    # Give USB transfers time to complete before event loop closes
+    await asyncio.sleep(0.5)
+
     # Output collected firmware dumps
     if collected_dumps:
         # Combine all dumps (prefer classic over BLE if both exist)

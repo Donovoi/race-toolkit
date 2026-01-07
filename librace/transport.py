@@ -253,6 +253,8 @@ class BumbleTransport(Transport):
             await self.device.power_off()
         if self.t:
             await self.t.close()
+        # Give USB transfers time to complete
+        await asyncio.sleep(0.2)
 
 
 class GATTBumbleChecker(BumbleTransport):
