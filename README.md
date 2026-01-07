@@ -1,54 +1,37 @@
 # RACE Toolkit
 
-> **Note:** This is a fork of the original [auracast-research/race-toolkit](https://github.com/auracast-research/race-toolkit) repository.
-
-## Changes from Original Repository
-
-This fork includes the following improvements over the original codebase:
-
-### USB Bluetooth Controller Reset Functionality
-
-Added robust USB Bluetooth controller management to prevent "device busy" errors:
-
-- **`release_bluetooth_controller()`** - Stops system Bluetooth services (`bluetooth.service`, `bluetoothd`) that may be holding the controller, preventing device conflicts
-- **`reset_usb_bluetooth_controller()`** - Performs a USB device reset using either `USBDEVFS_RESET` ioctl or sysfs fallback to clear stuck connections
-- **`_reset_hci_controller()`** - Resets HCI Bluetooth controllers (for built-in adapters) using `hciconfig`
-- **`enumerate_bluetooth_controllers()`** - Lists all available USB Bluetooth controllers with their VID:PID
-- **`select_bluetooth_controller()`** - Provides automatic or interactive controller selection when multiple are available
-
-### Improved Error Handling in Connection Retries
-
-Enhanced reliability when connecting to Bluetooth devices:
-
-- **Import fix** - Changed `ConnectionError` import to `BumbleConnectionError` to avoid shadowing Python's built-in exception
-- **Connection timeouts** - Added 15-second timeout for BLE connections and 10-second timeout for device scanning to prevent indefinite hangs
-- **Automatic retry with authentication** - When RFCOMM connection fails, automatically retries with authentication enabled
-- **Better error messages** - Improved logging with clearer error messages and suggestions (e.g., suggesting `--transport rfcomm` when BLE fails)
-- **Graceful device scanning** - Device scanning now returns `None` with helpful warnings instead of hanging indefinitely
-
-### Code Quality Improvements
-
-- Added module-level docstring explaining the toolkit's purpose
-- Improved logging format consistency (using `%s` style for better performance)
-- Added proper exception handling for `usb1` library import (graceful fallback when not installed)
-- Fixed duplicate `return False` statements in error paths
-- Better structured helper methods (e.g., `_establish_rfcomm_connection()`)
-
-### Commit History
-
-| Commit | Description |
-|--------|-------------|
-| `cc609a3` | USB controller reset and improved connection retry logic |
-
----
-
 RACE Toolkit is the tool released alongside our Airoha research. You can find more about that in our [blog post](https://insinuator.net/2025/12/bluetooth-headphone-jacking-full-disclosure-of-airoha-race-vulnerabilities).
 
 This repository contains a Python-based command-line toolkit for interacting with devices that expose the **RACE protocol** over various transports (BLE GATT, Bluetooth Classic RFCOMM, USB HID). It is primarily intended for further security research into the Airoha ecosystem and for end-users to check whether their devices are affected by the vulnerabilities.
 
-The tool supports RAM/flash dumping, device information queries, and has preliminary support for firmware updates (FOTA). Whether a given feature works with a specific device is largely dependent on the device. For example, RAM dumping only works on devices that (still) have the command exposed. The firmware update process currently only supports headphones, not TWS (true-wireless stereo) earbuds. 
+## What's New in This Fork
 
-RACE toolkit also offers a command to check whether a given device is affected by CVE-2025-20700, CVE-2025-20701, or CVE-2025-20702. However, due to differences in devices, we cannot guarantee the reliability of the check command. If it returns *FIXED*, there might still be a chance the device is vulnerable. For example, some devices require specific circumstances to bypass the Bluetooth Classic pairing. We also saw a device that was only vulnerable to the Classic pairing issue in one of multiple tries and across reboots. We didn't properly investigate all these devices and all these edge-cases. Nonetheless, the `check` command is a good starting point, and it will not generate false positives. If it considers a device as vulnerable, the device is vulnerable.
+This fork extends the original RACE toolkit with additional Bluetooth security research capabilities:
+
+### New Commands for Vulnerability Testing
+
+1. **Enhanced CVE PoCs**: Standalone proof-of-concept commands for each vulnerability
+2. **Bluetooth Discovery Tools**: Active scanning and passive monitoring capabilities  
+3. **Profile Exploitation Demos**: Hands-Free Profile (HFP) and experimental AVRCP demos
+4. **BLE GATT Enumeration**: Comprehensive service/characteristic enumeration
+
+### Key Additions
+
+- **`enumerate-classic`** - Demonstrates CVE-2025-20701 (BR/EDR auth bypass) by enumerating Classic services without pairing
+- **`hfp-demo`** - Exploits CVE-2025-20701 via Hands-Free Profile (answer calls, dial, control volume)
+- **`ble-info`** - Demonstrates CVE-2025-20700 (GATT auth bypass) by enumerating services without pairing
+- **`scan`** - Active Bluetooth device discovery (Classic and/or BLE)
+- **`sniff`** - Passive BLE advertisement monitoring for research
+- **`ble-speaker`** - [EXPERIMENTAL] BLE speaker control via vendor characteristics
+- **`avrcp`** - [EXPERIMENTAL] AVRCP media control without authentication
+
+### Improvements
+
+- Auto-detection of BLE address types (Public/Random)
+- Connection retry logic for unreliable Bluetooth connections
+- Binary firmware version parsing
+- Enhanced error handling and user feedback
+- Comprehensive help text for all commands
 
 ---
 
@@ -183,195 +166,482 @@ These options apply to all commands unless stated otherwise.
 
 ## Commands
 
-### `check`
+This toolkit provides commands organized into several categories:
 
-Check a device for the RACE vulnerabilities:
+### Core Vulnerability Testing
 
-- CVE-2025-20700 – Missing GATT authentication
-- CVE-2025-20701 – Missing BR/EDR authentication
-- CVE-2025-20702 – RACE protocol exposure (BLE and Classic)
+#### `check`
+
+**Comprehensive vulnerability assessment for RACE devices.**
+
+Check a device for all RACE vulnerabilities: CVE-2025-20700 (GATT auth), CVE-2025-20701 (BR/EDR auth), and CVE-2025-20702 (RACE protocol exposure).
 
 ```bash
 python race_toolkit.py check
 ```
 
-The command will interactively guide you through the process. It performs the following actions:
+The command will interactively guide you through:
+1. BLE device discovery and selection
+2. GATT service enumeration (CVE-2025-20700 test)
+3. RACE protocol access test via GATT
+4. Bluetooth Classic address retrieval
+5. Classic service enumeration (CVE-2025-20701 test)
+6. RACE protocol access test via RFCOMM (CVE-2025-20702 test)
 
-1. Scan BLE devices and ask which of these is the user's.
-2. Connect to the device and enumerate GATT services.
-3. Check if one of the known the RACE UUIDs is present.
-4. Test the flash read RACE command.
-5. Try to obtain the Bluetooth Classic address via the respective RACE command.
-6. Not all devices support this command. If it fails, it will ask the user for the Bluetooth Classic address.
-7. Connect to the device via Bluetooth Classic.
-8. Enumerate RFCOMM services.
-9. Check if one of the known RACE RFCOMM services is present.
-10. Connect and attempt to read flash using the RACE command via RFCOMM.
+**Tip**: If you already know your device's Bluetooth Classic address, use `--target-address` to skip auto-discovery.
 
-If you know your device's *Bluetooth Classic address* already, you can supply it via the `--target-address` parameter. RACE toolkit will try to obtain the address during the BLE phase. If this fails, it will interactively ask for the address. If the device is not available via BLE the automatic retrieval of the Classic address will not work.
-
-At the end, a summarized vulnerability status is printed.
+**Workflow**: This is your starting point - run this first to get a comprehensive vulnerability assessment.
 
 ---
 
-### `ram`
+### CVE-2025-20700: Missing GATT Authentication
+
+These commands demonstrate that BLE GATT services can be accessed without authentication:
+
+#### `ble-info`
+
+**Enumerate BLE GATT services without pairing.**
+
+Connects to a BLE device and reads all GATT services and characteristics without authentication.
+
+```bash
+# Discover and enumerate a BLE device
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF ble-info
+
+# Auto-detect address type (tries public first, then random)
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF ble-info
+
+# Explicit address type
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF/P ble-info
+```
+
+**Output**: Complete GATT service tree with characteristic properties and values.
+
+**Workflow**:
+1. Use `scan --mode ble` to discover BLE devices
+2. Copy target device address
+3. Run `ble-info` with the address
+4. Verify GATT access without authentication prompt
+
+---
+
+### CVE-2025-20701: Missing BR/EDR Authentication
+
+These commands demonstrate Bluetooth Classic profile access without pairing:
+
+#### `enumerate-classic`
+
+**Enumerate Bluetooth Classic services without pairing.**
+
+Connects via BR/EDR and enumerates all SDP services without authentication.
+
+```bash
+# Enumerate Classic services on a known device
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF enumerate-classic
+
+# Interactive mode - scans first
+python race_toolkit.py -c usb:0 enumerate-classic
+```
+
+**Output**: List of all exposed Classic services (SDP records) accessible without pairing.
+
+**Workflow**:
+1. Use `scan --mode classic` to discover Classic devices
+2. Run `enumerate-classic` with target address
+3. Verify SDP access without pairing prompt
+
+#### `hfp-demo`
+
+**Demonstrate Hands-Free Profile exploitation without pairing.**
+
+Accesses HFP (Hands-Free Profile) to answer calls, dial numbers, adjust volume, etc., without authentication.
+
+```bash
+# Get device info
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF hfp-demo --action info
+
+# Answer incoming call
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF hfp-demo --action answer
+
+# Dial a number
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF hfp-demo --action dial --number 5551234567
+
+# Trigger voice assistant
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF hfp-demo --action voice
+
+# Available actions: info, answer, reject, hangup, dial, voice, ring, volume, sco-ring
+```
+
+**Impact**: Remote control of phone calls and voice assistant without user consent.
+
+**Workflow**:
+1. Identify a headset/speaker with HFP support
+2. Test `--action info` to verify HFP access
+3. Demonstrate call control with other actions
+
+#### `avrcp` [EXPERIMENTAL]
+
+**AVRCP media control without authentication (may fail on some devices).**
+
+Attempts to control media playback via AVRCP profile without pairing.
+
+```bash
+# Test connection
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF avrcp --action info
+
+# Media controls
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF avrcp --action play
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF avrcp --action pause
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF avrcp --action vol-up --repeat 5
+```
+
+**Note**: This command frequently fails because:
+- Device must not be connected to another source (phone, etc.)
+- Some devices reject unauthenticated AVRCP connections
+- Connection is often cancelled by device
+
+---
+
+### CVE-2025-20702: RACE Protocol Exposure
+
+#### `enumerate-race`
+
+**Test RACE protocol access over Classic Bluetooth.**
+
+Attempts to access RACE protocol commands via RFCOMM without authentication.
+
+```bash
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF enumerate-race
+```
+
+**Workflow**: Same as other CVE-2025-20701 PoCs, but specifically tests RACE RFCOMM service access.
+
+---
+
+### RACE Protocol Commands
+
+These commands interact with the proprietary RACE protocol on Airoha chipsets:
+
+#### `ram`
 
 Read from device RAM.
 
 ```bash
-python race_toolkit.py [global options] ram --address <hex> --size <hex>
+python race_toolkit.py ram --address 0x10000 --size 0x100
 ```
 
 **Options:**
-
 - `--address` (required): Target RAM address (hex)
-- `--size` (required): Number of bytes to read (hex). Must be multiple of 4 as the command reads 4 bytes only.
+- `--size` (required): Number of bytes to read (hex, multiple of 4)
 
-**Behavior:**
-
-- Output is hex-dumped unless an `--outfile` is specified
+**Note**: Output is hex-dumped unless `--outfile` is specified.
 
 ---
 
-### `flash`
+#### `flash`
 
 Dump flash memory.
 
 ```bash
-python race_toolkit.py [global options] flash --address <hex> --size <hex>
+python race_toolkit.py flash --address 0x0 --size 0x1000
 ```
 
 **Options:**
-
-- `--address` (required): Flash start address (hex, multiple of `0x100`)
-- `--size` (required): Number of bytes to dump (hex, multiple of `0x100`)
+- `--address` (required): Flash start address (hex, multiple of 0x100)
+- `--size` (required): Number of bytes to dump (hex, multiple of 0x100)
 
 ---
 
-### `link-keys`
+#### `link-keys`
 
 Retrieve stored Bluetooth BR/EDR link keys.
 
 ```bash
-python race_toolkit.py [global options] link-keys
+python race_toolkit.py link-keys
 ```
 
-Notes:
-
-- This command does not work on many devices. The output only contains some link keys, not the other devices' Bluetooth addresses.
-- This is not the command used for the pivoting live demo. The NVDM partition also contains these keys (see `dump-partition`).
+**Note**: This command does not work on many devices. Consider using `dump-partition` to extract the NVDM partition instead, which contains link keys with more metadata.
 
 ---
 
-### `bdaddr`
+#### `bdaddr`
 
 Query the Bluetooth Classic address via RACE.
 
 ```bash
-python race_toolkit.py [global options] bdaddr
+python race_toolkit.py bdaddr
 ```
 
-Notes:
-
-- This is useful as the devices typically are not discoverable. So in order to connect via Bluetooth Classic, this commands removes the need for sniffing device addresses (e.g. by using an Ubertooth).
+**Use case**: Useful for non-discoverable devices. Eliminates need for Ubertooth or other sniffing hardware.
 
 ---
 
-### `sdkinfo`
+#### `sdkinfo`
 
 Retrieve SDK information from the device.
 
 ```bash
-python race_toolkit.py [global options] sdkinfo
+python race_toolkit.py sdkinfo
 ```
 
-Notes:
-
-- The response payload is interpreted as UTF-8 text.
-- Usually, this is not particularly helpful. For some devices the output is just version 1.
+**Note**: Output is interpreted as UTF-8 text. May just show "version 1" on some devices.
 
 ---
 
-### `buildversion`
+#### `buildversion`
 
 Retrieve the firmware build version string.
 
 ```bash
-python race_toolkit.py [global options] buildversion
+python race_toolkit.py buildversion
 ```
 
-Notes:
-
-- Many devices do not respond to this command any longer.
-- If they do, it's helpful for fingerprinting and identifying versions.
+**Note**: Many devices no longer respond to this command. When available, helpful for fingerprinting.
 
 ---
 
-### `mediainfo`
+#### `mediainfo`
 
-Dump metadata about the currently playing media.
-Proof-of-concept command for a live demo targeting the Sony WH-CH720N.
+Dump metadata about the currently playing media. **Sony WH-CH720N specific**.
 
 ```bash
-python race_toolkit.py [global options] mediainfo
+python race_toolkit.py mediainfo
 ```
 
-Important notes:
-
-* This is a proof-of-concept feature
-* It relies on hard-coded RAM offsets
-* Only supports for specific firmware versions and devices (Sony WH-CH720N)
+**Important**: This is a proof-of-concept feature with hard-coded RAM offsets. Only works on specific firmware versions of Sony WH-CH720N.
 
 ---
 
-### `dump-partition`
+#### `dump-partition`
 
 Interactively dump a flash partition.
 
 ```bash
-python race_toolkit.py [global options] --outfile <file> dump-partition
+python race_toolkit.py --outfile partition.bin dump-partition
 ```
 
-Workflow:
-
+**Workflow**:
 1. Reads and parses the partition table
 2. Displays all partitions
 3. Prompts the user to select a partition
-4. Dumps the selected partition to a file
+4. Dumps the selected partition to file
 
-This is usually used to dump the NVDM partition (most of the time it's partition number 6). This partition contains configuration data.
+**Common use**: Dump NVDM partition (usually #6) which contains configuration data and Bluetooth link keys.
 
-Notes:
-
-- The global `--outfile` option is required here. This command will not print to stdout.
+**Note**: The `--outfile` option is required.
 
 ---
 
-### `fota`
+#### `fota`
 
-**WARNING:** Only use this command if you know what you are doing!
+**⚠️ WARNING: Advanced users only! Can brick devices!**
 
-This command perform a FOTA firmware update. We reimplemented the FOTA process as we have observed it during an update of one of our devices. Additional information was retrieved by reverse-engineering the firmware and a mobile app. In the end, this process was confirmed to work with *Sony WH-CH720N* and *Sony WH-1000 XM6*. It likely works with other Sony headphone models, however, we have not confirmed this. The same applies to headphones from other vendors. Additionally, the current implementation of the FOTA process does not work with True Wireless Stereo (TWS) earbuds. This would require additional steps that we have not (yet) implemented.
-
-This implementation allows you to flash valid FOTA images. It also allows firmware downgrades. However, we don't recommend downgrading your production device. Sony firmware can be found in the [MDR Proxy Repository](https://github.com/lzghzr/MDR_Proxy). Make sure to choose the correct device when downloading the firmware and running the FOTA command.
-
-Again, don't use this if you don't know what you are doing. Due to the integrity checks of the firmware during the FOTA process it *should* be fine. During our research we bricked two devices after playing around with the firmware image and running the update.
+Perform a FOTA firmware update (or downgrade).
 
 ```bash
-python race_toolkit.py [global options] fota --fota-file <file> [options] 
+python race_toolkit.py fota --fota-file firmware.bin
 ```
 
 **Options:**
-
 - `--fota-file` (required): Path to the FOTA image
-- `--dont-reflash`: Do not erase/reflash the FOTA partition
-- `--chunks-per-write`: Number of chunks per flash write (default: 3)
+- `--dont-reflash`: Skip erase/reflash (for retrying current FOTA)
+- `--chunks-per-write`: Number of chunks per write (default: 3)
 
-Notes:
+**Confirmed working**: Sony WH-CH720N, Sony WH-1000 XM6
 
-- `--fota-file` is required unless `--dont-reflash` is set
-- Larger chunk sizes may not work on all devices. Usually 3 (default) works best.
+**Not supported**: TWS earbuds (requires additional implementation)
 
+**Firmware sources**: [MDR Proxy Repository](https://github.com/lzghzr/MDR_Proxy)
+
+**DANGER**: Firmware modification can brick devices. Proceed only if you understand the risks and have the correct firmware for your device.
+
+---
+
+### Utility Commands
+
+#### `scan`
+
+**Active Bluetooth device discovery.**
+
+Scan for Bluetooth Classic and/or BLE devices.
+
+```bash
+# Scan for Classic devices (default)
+python race_toolkit.py -c usb:0 scan
+
+# Scan for BLE devices
+python race_toolkit.py -c usb:0 scan --mode ble --timeout 10
+
+# Scan for both
+python race_toolkit.py -c usb:0 scan --mode both --timeout 15 --extended
+```
+
+**Options:**
+- `--mode`: `classic`, `ble`, or `both` (default: classic)
+- `--timeout`: Scan duration in seconds (default: 10)
+- `--extended`: Use extended inquiry for more device info
+
+**Output**: Device addresses, names, and metadata.
+
+---
+
+#### `sniff`
+
+**Passive BLE advertisement monitoring.**
+
+Continuously capture BLE advertisements without active scanning.
+
+```bash
+# Continuous monitoring (Ctrl+C to stop)
+python race_toolkit.py -c usb:0 sniff
+
+# Time-limited sniffing
+python race_toolkit.py -c usb:0 sniff --timeout 30
+
+# Filter by name
+python race_toolkit.py -c usb:0 sniff --filter "Headphones"
+
+# Filter by address prefix
+python race_toolkit.py -c usb:0 sniff --filter-addr "AA:BB:CC"
+
+# Show raw advertisement data
+python race_toolkit.py -c usb:0 sniff --show-raw --show-uuids
+```
+
+**Options:**
+- `--timeout`: Duration in seconds (0 = continuous)
+- `--filter`: Filter by device name substring
+- `--filter-addr`: Filter by MAC address prefix
+- `--show-raw`: Display raw advertisement bytes
+- `--show-uuids`: Display advertised service UUIDs
+- `--active`: Use active scanning (send scan requests)
+
+**Use case**: Research tool for monitoring BLE traffic, similar to nRF Connect.
+
+---
+
+#### `ble-speaker` [EXPERIMENTAL]
+
+**BLE speaker control via vendor-specific characteristics.**
+
+Attempts to control speakers via BLE GATT vendor characteristics.
+
+```bash
+# Discover control characteristics
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF ble-speaker --action probe
+
+# Read all characteristics
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF ble-speaker --action read-all
+
+# Test writable characteristics
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF ble-speaker --action write-test
+```
+
+**Note**: Limited success. Vendor characteristics are device-specific and not well documented. Most writes fail with length errors.
+
+---
+
+#### `raw`
+
+Send a raw RACE command packet.
+
+```bash
+python race_toolkit.py raw --id 0x5A10
+```
+
+**Option:**
+- `--id` (required): RACE command ID (hex)
+
+**Use case**: Low-level protocol research and testing undocumented commands.
+
+---
+
+## Workflows & Examples
+
+### Workflow 1: Test Device for All Vulnerabilities
+
+```bash
+# Single command comprehensive check
+python race_toolkit.py -c usb:0 check
+
+# Follow interactive prompts to test all three CVEs
+```
+
+### Workflow 2: Demonstrate CVE-2025-20700 (BLE GATT Auth Bypass)
+
+```bash
+# Step 1: Discover BLE devices
+python race_toolkit.py -c usb:0 scan --mode ble --timeout 10
+
+# Step 2: Enumerate GATT services without pairing
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF ble-info
+
+# Result: You should see all GATT services/characteristics without any pairing prompt
+```
+
+### Workflow 3: Demonstrate CVE-2025-20701 (Classic Auth Bypass)
+
+```bash
+# Step 1: Discover Classic devices
+python race_toolkit.py -c usb:0 scan --mode classic
+
+# Step 2: Enumerate Classic services
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF enumerate-classic
+
+# Step 3: Exploit HFP profile
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF hfp-demo --action info
+python race_toolkit.py -c usb:0 --target-address AA:BB:CC:DD:EE:FF hfp-demo --action voice
+
+# Result: You gain access to phone call controls and voice assistant without pairing
+```
+
+### Workflow 4: Extract NVDM Configuration
+
+```bash
+# Step 1: Connect via RACE transport (BLE GATT default)
+python race_toolkit.py --target-address AA:BB:CC:DD:EE:FF --outfile nvdm.bin dump-partition
+
+# Step 2: Select partition 6 (NVDM) when prompted
+
+# Result: NVDM partition containing config and Bluetooth link keys saved to nvdm.bin
+```
+
+### Workflow 5: Research BLE Traffic
+
+```bash
+# Passive monitoring with filtering
+python race_toolkit.py -c usb:0 sniff --filter "Sony" --show-uuids --active
+
+# Continuous monitoring of all devices
+python race_toolkit.py -c usb:0 sniff --show-raw
+```
+
+---
+
+## Best Practices
+
+### For Vulnerability Testing
+
+1. **Always start with `check` command** - Provides comprehensive assessment
+2. **Use specific PoCs** for demonstrations - `enumerate-classic`, `hfp-demo`, `ble-info`
+3. **Verify no pairing prompts** - The vulnerability allows access without user consent
+4. **Test multiple devices** - Results vary by manufacturer/firmware
+
+### For Research
+
+1. **Use `scan` for discovery** - Quick device identification
+2. **Use `sniff` for monitoring** - Passive traffic analysis
+3. **Use `ble-info` for GATT enumeration** - Complete service tree
+4. **Check address type** - Try with `/P` (public) or `/R` (random) suffix if auto-detect fails
+
+### For RACE Protocol Work
+
+1. **Get Classic address first** - Use `bdaddr` command or sniffing
+2. **Start with read-only commands** - `sdkinfo`, `buildversion` before `ram`/`flash`
+3. **Backup before FOTA** - `dump-partition` NVDM partition first
+4. **Use correct firmware** - Double-check device model before FOTA
+
+---
 
 ## Notice
 
