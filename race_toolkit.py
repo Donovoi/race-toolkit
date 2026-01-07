@@ -3992,14 +3992,28 @@ async def command_ble_info(args: argparse.Namespace):
         GATT_SOFTWARE_REVISION_STRING_CHARACTERISTIC,
     )
     import shutil
+    import signal
 
     controller = args.controller or "usb:0"
     target_address = args.target_address
     timeout = getattr(args, 'timeout', 10.0)
 
+    # Track if user requested cancellation
+    cancelled = False
+
+    def handle_sigint(signum, frame):
+        nonlocal cancelled
+        cancelled = True
+        print("\n\n  \033[1;33m⚠ Interrupted by user (Ctrl+C)\033[0m")
+        raise KeyboardInterrupt()
+
+    # Install signal handler for clean Ctrl+C
+    original_handler = signal.signal(signal.SIGINT, handle_sigint)
+
     if not target_address:
         logging.error(
             "Target address required. Use --target-address or run 'sniff --active' first.")
+        signal.signal(signal.SIGINT, original_handler)
         return
 
     # Release Bluetooth controller
@@ -4741,14 +4755,27 @@ async def command_ble_info(args: argparse.Namespace):
 
         print(f"\n\033[1;36m{'═' * term_width}\033[0m\n")
 
+    except KeyboardInterrupt:
+        print(f"\n  \033[1;33mCleaning up...\033[0m")
+    except asyncio.CancelledError:
+        print(f"\n  \033[1;33mOperation cancelled. Cleaning up...\033[0m")
     except Exception as e:
         logging.error("Enumeration failed: %s", e)
         import traceback
         traceback.print_exc()
     finally:
+        # Restore original signal handler
+        try:
+            signal.signal(signal.SIGINT, original_handler)
+        except Exception:
+            pass
+        # Clean up connections
         try:
             if connection:
                 await connection.disconnect()
+        except Exception:
+            pass
+        try:
             if t:
                 await t.close()
         except Exception:
@@ -7247,18 +7274,30 @@ async def _offer_transport_fallback(
 
 def run_main():
     """Run main with proper exception handling."""
+    import signal
+
     # Check debug flag early for exception handling display
     debug_mode = "--debug" in sys.argv
+
+    # Set up a flag to track if we're shutting down
+    shutdown_requested = False
+
+    def force_exit(signum, frame):
+        """Force exit on second Ctrl+C."""
+        print("\n\033[1;31mForce exit.\033[0m")
+        sys.exit(130)
 
     try:
         asyncio.run(main())
     except asyncio.CancelledError:
-        # Task was cancelled, usually due to connection issues
+        # Task was cancelled, usually due to connection issues or Ctrl+C
         if debug_mode:
             logging.debug("Traceback:\n%s", traceback.format_exc())
-        logging.error(
-            "Operation was cancelled. The connection may have been lost."
-        )
+        # Don't print error if it was user-initiated
+        if not shutdown_requested:
+            logging.error(
+                "Operation was cancelled. The connection may have been lost."
+            )
         sys.exit(1)
     except asyncio.TimeoutError as e:
         if debug_mode:
@@ -7281,7 +7320,12 @@ def run_main():
         )
         sys.exit(1)
     except KeyboardInterrupt:
-        logging.info("Interrupted by user.")
+        # User pressed Ctrl+C - this is expected, not an error
+        shutdown_requested = True
+        # Install handler for second Ctrl+C to force exit
+        signal.signal(signal.SIGINT, force_exit)
+        print(
+            "\n\033[1;33mInterrupted. Press Ctrl+C again to force exit.\033[0m")
         sys.exit(130)
     except Exception as e:  # pylint: disable=broad-exception-caught
         # Catch-all for any other exceptions (including bumble exceptions)
