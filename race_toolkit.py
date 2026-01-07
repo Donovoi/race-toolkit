@@ -2634,6 +2634,10 @@ async def lookup_oui_vendor(mac_address: str) -> dict:
 
 # Known BLE specifications database - maps UUIDs to their documented purpose
 KNOWN_BLE_SPECIFICATIONS = {
+    # ═══════════════════════════════════════════════════════════════════════════
+    # BLUETOOTH SIG STANDARD SPECIFICATIONS
+    # ═══════════════════════════════════════════════════════════════════════════
+
     # DULT (Detecting Unwanted Location Trackers) - IETF Draft
     "15190001-12f4-c226-88ed-2ac5579f2a85": {
         "name": "DULT Non-Owner Service",
@@ -2649,10 +2653,121 @@ KNOWN_BLE_SPECIFICATIONS = {
         "url": "https://www.ietf.org/archive/id/draft-detecting-unwanted-location-trackers-01.html",
         "section": "3.10 Accessory Connections"
     },
-    # Google Fast Pair - Extended characteristics
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # APPLE - AirPods, AirTags, Find My, Continuity
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Apple Continuity Service
+    "d0611e78-bbb4-4591-a5f8-487910ae4366": {
+        "name": "Apple Continuity Service",
+        "description": "Apple Continuity features (Handoff, AirDrop, etc.)",
+        "spec": "Apple Continuity Protocol",
+        "url": "https://github.com/furiousMAC/continuern"
+    },
+    # Apple Notification Center Service (ANCS)
+    "7905f431-b5ce-4e99-a40f-4b1e122d00d0": {
+        "name": "Apple ANCS Service",
+        "description": "Apple Notification Center Service for iOS notifications",
+        "spec": "Apple ANCS Specification",
+        "url": "https://developer.apple.com/library/archive/documentation/CoreBluetooth/Reference/AppleNotificationCenterServiceSpecification/"
+    },
+    "9fbf120d-6301-42d9-8c58-25e699a21dbd": {
+        "name": "ANCS Notification Source",
+        "description": "Notification source characteristic (notifies of new/modified/removed notifications)",
+        "spec": "Apple ANCS Specification",
+        "url": "https://developer.apple.com/library/archive/documentation/CoreBluetooth/Reference/AppleNotificationCenterServiceSpecification/"
+    },
+    "69d1d8f3-45e1-49a8-9821-9bbdfdaad9d9": {
+        "name": "ANCS Control Point",
+        "description": "Control point for requesting notification attributes",
+        "spec": "Apple ANCS Specification",
+        "url": "https://developer.apple.com/library/archive/documentation/CoreBluetooth/Reference/AppleNotificationCenterServiceSpecification/"
+    },
+    "22eac6e9-24d6-4bb5-be44-b36ace7c7bfb": {
+        "name": "ANCS Data Source",
+        "description": "Data source for notification attributes",
+        "spec": "Apple ANCS Specification",
+        "url": "https://developer.apple.com/library/archive/documentation/CoreBluetooth/Reference/AppleNotificationCenterServiceSpecification/"
+    },
+    # Apple Media Service (AMS)
+    "89d3502b-0f36-433a-8ef4-c502ad55f8dc": {
+        "name": "Apple Media Service",
+        "description": "Apple Media Service for media control",
+        "spec": "Apple AMS Specification",
+        "url": "https://developer.apple.com/library/archive/documentation/CoreBluetooth/Reference/AppleMediaService_Ref/"
+    },
+    "9b3c81d8-57b1-4a8a-b8df-0e56f7ca51c2": {
+        "name": "AMS Remote Command",
+        "description": "Remote command characteristic for media control",
+        "spec": "Apple AMS Specification",
+        "url": None
+    },
+    "2f7cabce-808d-411f-9a0c-bb92ba96c102": {
+        "name": "AMS Entity Update",
+        "description": "Entity update notifications (track, player, queue)",
+        "spec": "Apple AMS Specification",
+        "url": None
+    },
+    "c6b2f38c-23ab-46d8-a6ab-a3a870bbd5d7": {
+        "name": "AMS Entity Attribute",
+        "description": "Read entity attributes (artist, album, title)",
+        "spec": "Apple AMS Specification",
+        "url": None
+    },
+    # Apple Find My / AirTag
+    "fd43": {
+        "name": "Apple Find My Service",
+        "description": "Apple Find My network service",
+        "spec": "Apple Find My Network",
+        "url": "https://support.apple.com/guide/security/find-my-network-security"
+    },
+    # Apple AirPods
+    "74ec2172-0bad-4d01-8f77-997b2be0722a": {
+        "name": "Apple AirPods Service",
+        "description": "Apple AirPods proprietary control service",
+        "spec": "Apple AirPods Protocol (proprietary)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # GOOGLE - Fast Pair, Nearby Share, Android
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Google Fast Pair Service (0xFE2C)
+    "0000fe2c-0000-1000-8000-00805f9b34fb": {
+        "name": "Google Fast Pair Service",
+        "description": "Google Fast Pair for quick Bluetooth pairing",
+        "spec": "Google Fast Pair Specification",
+        "url": "https://developers.google.com/nearby/fast-pair/specifications"
+    },
     "fe2c1233-8366-4814-8eb0-01de32100bea": {
         "name": "Fast Pair Firmware Revision",
         "description": "Returns device firmware revision string",
+        "spec": "Google Fast Pair Specification",
+        "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
+    },
+    "fe2c1234-8366-4814-8eb0-01de32100bea": {
+        "name": "Fast Pair Model ID",
+        "description": "24-bit model ID for device identification",
+        "spec": "Google Fast Pair Specification",
+        "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
+    },
+    "fe2c1235-8366-4814-8eb0-01de32100bea": {
+        "name": "Fast Pair Key-Based Pairing",
+        "description": "Key-based pairing characteristic for secure Fast Pair",
+        "spec": "Google Fast Pair Specification",
+        "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
+    },
+    "fe2c1236-8366-4814-8eb0-01de32100bea": {
+        "name": "Fast Pair Passkey",
+        "description": "Passkey characteristic for Fast Pair authentication",
+        "spec": "Google Fast Pair Specification",
+        "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
+    },
+    "fe2c1237-8366-4814-8eb0-01de32100bea": {
+        "name": "Fast Pair Account Key",
+        "description": "Account key for personalized Fast Pair",
         "spec": "Google Fast Pair Specification",
         "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
     },
@@ -2680,6 +2795,90 @@ KNOWN_BLE_SPECIFICATIONS = {
         "spec": "Google Fast Pair Specification",
         "url": "https://developers.google.com/nearby/fast-pair/specifications/characteristics"
     },
+    # Google Nearby Share / Quick Share
+    "0000fe2d-0000-1000-8000-00805f9b34fb": {
+        "name": "Google Nearby Presence",
+        "description": "Google Nearby Presence for device discovery",
+        "spec": "Google Nearby",
+        "url": "https://developers.google.com/nearby"
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SAMSUNG - Galaxy Buds, SmartThings, Wearables
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Samsung Galaxy Buds
+    "00001101-0000-1000-8000-00805f9b34fb": {
+        "name": "Serial Port Profile (SPP)",
+        "description": "Bluetooth Serial Port Profile (used by Galaxy Buds)",
+        "spec": "Bluetooth SIG SPP",
+        "url": None
+    },
+    "a3c87500-8ed3-4bdf-8a39-a01bebede295": {
+        "name": "Samsung Galaxy Buds Service",
+        "description": "Samsung Galaxy Buds proprietary control service",
+        "spec": "Samsung Wearable SDK",
+        "url": "https://github.com/ThePBone/GalaxyBudsClient"
+    },
+    "a3c87501-8ed3-4bdf-8a39-a01bebede295": {
+        "name": "Galaxy Buds Data",
+        "description": "Galaxy Buds data exchange characteristic",
+        "spec": "Samsung Wearable SDK",
+        "url": "https://github.com/ThePBone/GalaxyBudsClient"
+    },
+    "a3c87502-8ed3-4bdf-8a39-a01bebede295": {
+        "name": "Galaxy Buds Control",
+        "description": "Galaxy Buds control commands",
+        "spec": "Samsung Wearable SDK",
+        "url": "https://github.com/ThePBone/GalaxyBudsClient"
+    },
+    # Samsung SmartThings
+    "0000fe31-0000-1000-8000-00805f9b34fb": {
+        "name": "Samsung SmartThings Service",
+        "description": "Samsung SmartThings IoT service",
+        "spec": "Samsung SmartThings",
+        "url": "https://developer.smartthings.com/"
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # BOSE - QuietComfort, SoundLink, Headphones
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "febe": {
+        "name": "Bose Service",
+        "description": "Bose proprietary service UUID",
+        "spec": "Bose Connect SDK",
+        "url": None
+    },
+    "0000febe-0000-1000-8000-00805f9b34fb": {
+        "name": "Bose Service (Full)",
+        "description": "Bose proprietary service for headphones control",
+        "spec": "Bose Connect SDK",
+        "url": None
+    },
+    "d49ab8f8-b09f-4d42-9abc-7aa9f7b9b1e0": {
+        "name": "Bose QuietComfort Service",
+        "description": "Bose QuietComfort ANC and control service",
+        "spec": "Bose Connect SDK (proprietary)",
+        "url": "https://github.com/AsteroidOS/bose-qc35-reverse-engineering"
+    },
+    "f5aa5a71-593f-4a19-8f58-0e54f3f8e501": {
+        "name": "Bose Control Characteristic",
+        "description": "Bose headphone control characteristic",
+        "spec": "Bose Connect SDK (proprietary)",
+        "url": None
+    },
+    "69c67fa6-93d5-4c8d-855b-3f8e8d7f7c59": {
+        "name": "Bose Status Notify",
+        "description": "Bose status notification characteristic",
+        "spec": "Bose Connect SDK (proprietary)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SONY - WH-1000XM Series, WF Earbuds, Walkman
+    # ═══════════════════════════════════════════════════════════════════════════
+
     # Sony Audio Services (5b833eXX base pattern)
     "5b833e06-6bc7-4802-8e9a-723ceca4bd8f": {
         "name": "Sony Audio Control Service",
@@ -2803,7 +3002,408 @@ KNOWN_BLE_SPECIFICATIONS = {
         "spec": "Sony Headphones SDK (proprietary)",
         "url": None
     },
-    # Other common vendor characteristics
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # JABRA - Elite Series, Evolve, Talk
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "82dd9600-a6e2-4f57-8437-c0af6b8c5ef8": {
+        "name": "Jabra Service",
+        "description": "Jabra proprietary control service",
+        "spec": "Jabra SDK (proprietary)",
+        "url": None
+    },
+    "82dd9601-a6e2-4f57-8437-c0af6b8c5ef8": {
+        "name": "Jabra Command",
+        "description": "Jabra command write characteristic",
+        "spec": "Jabra SDK (proprietary)",
+        "url": None
+    },
+    "82dd9602-a6e2-4f57-8437-c0af6b8c5ef8": {
+        "name": "Jabra Response",
+        "description": "Jabra response notification characteristic",
+        "spec": "Jabra SDK (proprietary)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SENNHEISER - Momentum, HD Series, Gaming
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "8d0a0000-8b36-4e47-8c20-59b96a1e2f28": {
+        "name": "Sennheiser Service",
+        "description": "Sennheiser proprietary audio service",
+        "spec": "Sennheiser Smart Control (proprietary)",
+        "url": None
+    },
+    "8d0a0001-8b36-4e47-8c20-59b96a1e2f28": {
+        "name": "Sennheiser Control",
+        "description": "Sennheiser control characteristic",
+        "spec": "Sennheiser Smart Control (proprietary)",
+        "url": None
+    },
+    "8d0a0002-8b36-4e47-8c20-59b96a1e2f28": {
+        "name": "Sennheiser Status",
+        "description": "Sennheiser status notification characteristic",
+        "spec": "Sennheiser Smart Control (proprietary)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # JBL / HARMAN - Tune, Live, Club Series
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "65786365-6c70-6f69-6e74-000000000000": {
+        "name": "Harman/JBL Service",
+        "description": "Harman/JBL proprietary audio service",
+        "spec": "JBL Headphones SDK (proprietary)",
+        "url": None
+    },
+    "65786365-6c70-6f69-6e74-000000000001": {
+        "name": "JBL Control Write",
+        "description": "JBL control write characteristic",
+        "spec": "JBL Headphones SDK (proprietary)",
+        "url": None
+    },
+    "65786365-6c70-6f69-6e74-000000000002": {
+        "name": "JBL Status Notify",
+        "description": "JBL status notification characteristic",
+        "spec": "JBL Headphones SDK (proprietary)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # BEATS (APPLE) - Studio, Solo, Fit, Powerbeats
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "9d8a5c00-81c3-4e49-a0b7-d97a59b81f10": {
+        "name": "Beats Service",
+        "description": "Beats by Dre proprietary service (Apple subsidiary)",
+        "spec": "Beats SDK (proprietary, Apple)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # QUALCOMM - QCC Chipsets, aptX, TrueWireless
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "00001100-d102-11e1-9b23-00025b00a5a5": {
+        "name": "Qualcomm aptX Service",
+        "description": "Qualcomm aptX codec service",
+        "spec": "Qualcomm aptX",
+        "url": "https://www.qualcomm.com/products/features/aptx"
+    },
+    "00001101-d102-11e1-9b23-00025b00a5a5": {
+        "name": "Qualcomm TWS Service",
+        "description": "Qualcomm TrueWireless Stereo service",
+        "spec": "Qualcomm TWS+",
+        "url": None
+    },
+    "0000eb03-d102-11e1-9b23-00025b00a5a5": {
+        "name": "Qualcomm GAIA Service",
+        "description": "Qualcomm GAIA protocol for device management",
+        "spec": "Qualcomm GAIA",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # NORDIC SEMICONDUCTOR - nRF Chipsets, DFU
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "00001530-1212-efde-1523-785feabcd123": {
+        "name": "Nordic DFU Service",
+        "description": "Nordic Semiconductor DFU (Device Firmware Update) service",
+        "spec": "Nordic DFU Protocol",
+        "url": "https://infocenter.nordicsemi.com/topic/sdk_nrf5_v17.1.0/lib_dfu_transport_ble.html"
+    },
+    "00001531-1212-efde-1523-785feabcd123": {
+        "name": "Nordic DFU Control Point",
+        "description": "DFU control point for firmware update commands",
+        "spec": "Nordic DFU Protocol",
+        "url": None
+    },
+    "00001532-1212-efde-1523-785feabcd123": {
+        "name": "Nordic DFU Packet",
+        "description": "DFU packet characteristic for firmware data",
+        "spec": "Nordic DFU Protocol",
+        "url": None
+    },
+    "00001534-1212-efde-1523-785feabcd123": {
+        "name": "Nordic DFU Version",
+        "description": "DFU version characteristic",
+        "spec": "Nordic DFU Protocol",
+        "url": None
+    },
+    # Nordic UART Service (NUS)
+    "6e400001-b5a3-f393-e0a9-e50e24dcca9e": {
+        "name": "Nordic UART Service",
+        "description": "Nordic UART Service for serial communication over BLE",
+        "spec": "Nordic UART Service",
+        "url": "https://developer.nordicsemi.com/nRF_Connect_SDK/doc/latest/nrf/libraries/bluetooth_services/services/nus.html"
+    },
+    "6e400002-b5a3-f393-e0a9-e50e24dcca9e": {
+        "name": "Nordic UART RX",
+        "description": "UART RX characteristic (write to device)",
+        "spec": "Nordic UART Service",
+        "url": None
+    },
+    "6e400003-b5a3-f393-e0a9-e50e24dcca9e": {
+        "name": "Nordic UART TX",
+        "description": "UART TX characteristic (notify from device)",
+        "spec": "Nordic UART Service",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TEXAS INSTRUMENTS - CC26xx, SensorTag
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "f000aa00-0451-4000-b000-000000000000": {
+        "name": "TI SensorTag IR Temperature",
+        "description": "TI SensorTag IR temperature service",
+        "spec": "TI SensorTag",
+        "url": "https://www.ti.com/tool/CC2650STK"
+    },
+    "f000aa20-0451-4000-b000-000000000000": {
+        "name": "TI SensorTag Humidity",
+        "description": "TI SensorTag humidity service",
+        "spec": "TI SensorTag",
+        "url": None
+    },
+    "f000aa40-0451-4000-b000-000000000000": {
+        "name": "TI SensorTag Barometer",
+        "description": "TI SensorTag barometric pressure service",
+        "spec": "TI SensorTag",
+        "url": None
+    },
+    "f000aa80-0451-4000-b000-000000000000": {
+        "name": "TI SensorTag Movement",
+        "description": "TI SensorTag motion/accelerometer service",
+        "spec": "TI SensorTag",
+        "url": None
+    },
+    "f000ffc0-0451-4000-b000-000000000000": {
+        "name": "TI OAD Service",
+        "description": "TI Over-the-Air Download (firmware update) service",
+        "spec": "TI OAD Protocol",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # XIAOMI / MI - Mi Band, Buds, Smart Home
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "0000fee0-0000-1000-8000-00805f9b34fb": {
+        "name": "Xiaomi Mi Band Service",
+        "description": "Xiaomi Mi Band fitness tracker service",
+        "spec": "Xiaomi Wearable SDK",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "0000fee1-0000-1000-8000-00805f9b34fb": {
+        "name": "Xiaomi Authentication Service",
+        "description": "Xiaomi device authentication service",
+        "spec": "Xiaomi Wearable SDK",
+        "url": "https://github.com/Freeyourgadget/Gadgetbridge"
+    },
+    "00000009-0000-3512-2118-0009af100700": {
+        "name": "Xiaomi Buds Service",
+        "description": "Xiaomi earbuds control service",
+        "spec": "Xiaomi Audio SDK (proprietary)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # HUAWEI - FreeBuds, Watch, Band
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "0000fe86-0000-1000-8000-00805f9b34fb": {
+        "name": "Huawei Service",
+        "description": "Huawei proprietary service",
+        "spec": "Huawei Wearable SDK",
+        "url": None
+    },
+    "fe86": {
+        "name": "Huawei Service (Short)",
+        "description": "Huawei proprietary service (16-bit)",
+        "spec": "Huawei Wearable SDK",
+        "url": None
+    },
+    "00002a50-0000-1000-8000-00805f9b34fb": {
+        "name": "Huawei PnP ID (Extended)",
+        "description": "Huawei extended PnP ID characteristic",
+        "spec": "Huawei Wearable SDK",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # FITBIT (GOOGLE) - Fitness Trackers, Smartwatches
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "adabfb00-6e7d-4601-bda2-bffaa68956ba": {
+        "name": "Fitbit Service",
+        "description": "Fitbit proprietary communication service",
+        "spec": "Fitbit SDK (proprietary, Google)",
+        "url": None
+    },
+    "adabfb01-6e7d-4601-bda2-bffaa68956ba": {
+        "name": "Fitbit Write",
+        "description": "Fitbit data write characteristic",
+        "spec": "Fitbit SDK (proprietary)",
+        "url": None
+    },
+    "adabfb02-6e7d-4601-bda2-bffaa68956ba": {
+        "name": "Fitbit Notify",
+        "description": "Fitbit notification characteristic",
+        "spec": "Fitbit SDK (proprietary)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # GARMIN - Fitness, GPS, Smartwatches
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "6a4e2401-667b-11e3-949a-0800200c9a66": {
+        "name": "Garmin Service",
+        "description": "Garmin Connect IQ service",
+        "spec": "Garmin Connect IQ SDK",
+        "url": "https://developer.garmin.com/connect-iq/"
+    },
+    "6a4e2800-667b-11e3-949a-0800200c9a66": {
+        "name": "Garmin GFDI Service",
+        "description": "Garmin GFDI (File Download Interface) service",
+        "spec": "Garmin GFDI Protocol",
+        "url": None
+    },
+    "6a4e2500-667b-11e3-949a-0800200c9a66": {
+        "name": "Garmin FIT Service",
+        "description": "Garmin FIT file transfer service",
+        "spec": "Garmin FIT SDK",
+        "url": "https://developer.garmin.com/fit/protocol/"
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # TILE / LIFE360 - Trackers
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "feed": {
+        "name": "Tile Service (Short)",
+        "description": "Tile tracker service",
+        "spec": "Tile Protocol",
+        "url": None
+    },
+    "0000feed-0000-1000-8000-00805f9b34fb": {
+        "name": "Tile Service",
+        "description": "Tile tracker communication service",
+        "spec": "Tile Protocol",
+        "url": None
+    },
+    "9d410018-35d6-f4dd-ba60-e7bd8dc491c0": {
+        "name": "Tile TOA Service",
+        "description": "Tile TOA (Time of Arrival) ranging service",
+        "spec": "Tile Protocol",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SKULLCANDY - Headphones, Earbuds
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "65786365-6c70-6f69-6e74-2e636f6d0001": {
+        "name": "Skullcandy Service",
+        "description": "Skullcandy proprietary control service",
+        "spec": "Skullcandy App SDK (proprietary)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ANKER / SOUNDCORE - Earbuds, Speakers
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "0cf4": {
+        "name": "Anker/Soundcore Service (Short)",
+        "description": "Anker/Soundcore proprietary service",
+        "spec": "Soundcore App SDK (proprietary)",
+        "url": None
+    },
+    "cba20d00-224d-11e6-9fb8-0002a5d5c51b": {
+        "name": "Anker Switchbot Service",
+        "description": "Anker/Switchbot IoT device service",
+        "spec": "Switchbot API",
+        "url": "https://github.com/OpenWonderLabs/SwitchBotAPI-BLE"
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # BANG & OLUFSEN - Premium Audio
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "0000180f-0000-1000-8000-00805f9b34fb": {
+        "name": "Battery Service",
+        "description": "Standard Battery Service (used by B&O)",
+        "spec": "Bluetooth SIG",
+        "url": "https://www.bluetooth.com/specifications/specs/battery-service-1-0/"
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # AUDIO-TECHNICA - Headphones
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "0efc95c0-b0f5-11e3-8a8b-f4a7dcf0e8a5": {
+        "name": "Audio-Technica Service",
+        "description": "Audio-Technica proprietary control service",
+        "spec": "Audio-Technica Connect App (proprietary)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PLANTRONICS / POLY - Headsets
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "82d0e001-bab8-4037-b9be-6680cd001ab4": {
+        "name": "Plantronics/Poly Service",
+        "description": "Plantronics/Poly headset control service",
+        "spec": "Plantronics Hub SDK (proprietary)",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # REALTEK - BT Chipsets (RTL87xx)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "0000ffc0-0000-1000-8000-00805f9b34fb": {
+        "name": "Realtek OTA Service",
+        "description": "Realtek RTL87xx OTA update service",
+        "spec": "Realtek BT SDK",
+        "url": None
+    },
+    "d0611e78-bbb4-4591-a5f8-487910ae4367": {
+        "name": "Realtek Vendor Service",
+        "description": "Realtek proprietary vendor service",
+        "spec": "Realtek BT SDK",
+        "url": None
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ESPRESSIF - ESP32 BLE
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    "000000ff-0000-1000-8000-00805f9b34fb": {
+        "name": "ESP32 Provisioning Service",
+        "description": "ESP32 WiFi provisioning over BLE",
+        "spec": "ESP-IDF Provisioning",
+        "url": "https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/provisioning/wifi_provisioning.html"
+    },
+    "021a9004-0382-4aea-bff4-6b3f1c5adfb4": {
+        "name": "ESP32 BluFi Service",
+        "description": "ESP32 BluFi WiFi configuration service",
+        "spec": "ESP-IDF BluFi",
+        "url": "https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/bluetooth/esp_blufi.html"
+    },
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # COMMON VENDOR PATTERNS
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Audio Codec Control (common pattern)
     "45c93e07-d90d-4b93-a9db-91e5dd734e35": {
         "name": "Audio Codec Control Service",
         "description": "Audio codec configuration service (LDAC, AAC, SBC selection)",
@@ -2828,6 +3428,7 @@ KNOWN_BLE_SPECIFICATIONS = {
         "spec": "Vendor Audio SDK",
         "url": None
     },
+    # OTA Update (common pattern)
     "76c13020-fe8f-416a-b4c3-ee59d3ef95dc": {
         "name": "OTA Update Service",
         "description": "Over-the-air firmware update service",
@@ -2846,6 +3447,7 @@ KNOWN_BLE_SPECIFICATIONS = {
         "spec": "Vendor OTA Protocol",
         "url": None
     },
+    # Spatial Audio (common pattern)
     "dc405470-a351-4a59-97d8-2e2e3b207fbb": {
         "name": "Spatial Audio Service",
         "description": "Spatial/3D audio and head tracking service",
@@ -2864,12 +3466,14 @@ KNOWN_BLE_SPECIFICATIONS = {
         "spec": "Vendor Spatial Audio SDK",
         "url": None
     },
+    # LE Audio Control
     "11c8b310-80e4-4276-afc0-f81590b2177f": {
         "name": "LE Audio Control Service",
         "description": "Bluetooth LE Audio control service",
         "spec": "Bluetooth LE Audio",
         "url": "https://www.bluetooth.com/specifications/le-audio/"
     },
+    # Generic vendor extensions
     "28bc862f-87d2-457b-b45a-5c838c4a66ff": {
         "name": "Vendor Extended Control",
         "description": "Vendor-specific extended control service",
@@ -2881,7 +3485,7 @@ KNOWN_BLE_SPECIFICATIONS = {
         "description": "Vendor-specific extended control characteristic",
         "spec": "Vendor SDK",
         "url": None
-    }
+    },
 }
 
 
