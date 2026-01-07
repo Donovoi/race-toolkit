@@ -59,12 +59,15 @@ from librace.util import setup_logging
 from librace.parttable import parse_partition_table
 
 # Rich library for beautiful table formatting
-from rich.console import Console
+from rich.console import Console, Group
 from rich.table import Table
 from rich.text import Text
+from rich.live import Live
+from rich.panel import Panel
+from rich.rule import Rule
 
-# Global console instance for rich output
-_console = Console()
+# Global console instance for rich output (force_terminal ensures colors work)
+_console = Console(force_terminal=True)
 
 
 def create_table(columns: list, title: str = None, box_style=None) -> Table:
@@ -2507,55 +2510,57 @@ async def command_ble_scan(args: argparse.Namespace):
 
         return details
 
-    def clear_screen():
-        """Clear terminal screen and reset cursor to top."""
-        # Use both clear screen and move to home, plus clear scrollback
-        import sys
-        sys.stdout.write("\033[2J\033[H\033[3J")
-        sys.stdout.flush()
-
-    def move_cursor(row: int, col: int = 1):
-        """Move cursor to position."""
-        print(f"\033[{row};{col}H", end="", flush=True)
-
-    def draw_table():
-        """Draw the device table."""
+    def generate_live_display() -> Group:
+        """Generate the live display with header, table, and footer."""
         term_size = shutil.get_terminal_size((80, 24))
-        width = term_size.columns
         height = term_size.lines
 
-        clear_screen()
-
         # Header
-        elapsed = time.time() - start_time[0] if start_time[0] else 0
-        print("\033[1;36m" + "=" * width + "\033[0m")
-        title = "  BLE SCANNER  "
-        padding = (width - len(title)) // 2
-        print("\033[1;36m" + " " * padding + title + " " * padding + "\033[0m")
-        print("\033[1;36m" + "=" * width + "\033[0m")
-        print()
+        header = Panel(
+            Text("BLE SCANNER", justify="center", style="bold cyan"),
+            style="cyan",
+            padding=(0, 0),
+        )
 
         # Stats line with enumeration/scan status
-        if enum_in_progress[0]:
-            status_str = "  |  \033[1;35m⟳ ENUMERATING...\033[0m"
-        elif scan_paused_since[0]:
-            status_str = "  |  \033[1;31m⏸ SCAN PAUSED\033[0m"
-        else:
-            status_str = ""
+        elapsed = time.time() - start_time[0] if start_time[0] else 0
+        stats_text = Text("  ")
+        stats_text.append(f"Devices: ", style="default")
+        stats_text.append(f"{len(devices_seen)}", style="bold yellow")
+        stats_text.append("  |  Packets: ", style="default")
+        stats_text.append(f"{packet_count[0]}", style="bold yellow")
+        stats_text.append("  |  Time: ", style="default")
+        stats_text.append(f"{elapsed:.0f}s", style="bold yellow")
 
         # Count trackers for warning
         tracker_count = sum(
             1 for _, info in devices_seen.items() if info.get("tracker"))
-        tracker_str = f"  |  \033[1;31m⚠ {tracker_count} TRACKER(S)\033[0m" if tracker_count > 0 else ""
+        if tracker_count > 0:
+            stats_text.append("  |  ", style="default")
+            stats_text.append(
+                f"⚠ {tracker_count} TRACKER(S)", style="bold red")
 
-        stats = f"  Devices: \033[1;33m{len(devices_seen)}\033[0m  |  Packets: \033[1;33m{packet_count[0]}\033[0m  |  Time: \033[1;33m{elapsed:.0f}s\033[0m{tracker_str}{status_str}"
-        print(stats)
-        print()
+        if enum_in_progress[0]:
+            stats_text.append("  |  ", style="default")
+            stats_text.append("⟳ ENUMERATING...", style="bold magenta")
+        elif scan_paused_since[0]:
+            stats_text.append("  |  ", style="default")
+            stats_text.append("⏸ SCAN PAUSED", style="bold red")
 
-        # Table header - fixed column widths
-        W_NUM, W_ADDR, W_RSSI, W_NAME, W_VENDOR, W_INFO = 3, 20, 7, 20, 14, 8
-        header = f"{'#':>{W_NUM}}  {'ADDRESS':<{W_ADDR}}  {'RSSI':>{W_RSSI}}  {'NAME':<{W_NAME}}  {'VENDOR':<{W_VENDOR}}  {'INFO':<{W_INFO}}"
-        print("\033[1;37;44m  " + header + "  \033[0m")
+        # Create table
+        table = Table(
+            show_header=True,
+            header_style="bold white on blue",
+            box=None,
+            padding=(0, 1),
+            expand=True,
+        )
+        table.add_column("#", justify="right", width=3, no_wrap=True)
+        table.add_column("ADDRESS", width=20, no_wrap=True)
+        table.add_column("RSSI", justify="right", width=7, no_wrap=True)
+        table.add_column("NAME", width=20)
+        table.add_column("VENDOR", width=14)
+        table.add_column("INFO", width=8)
 
         # Sort devices by RSSI descending, then by address
         sorted_devices = sorted(
@@ -2564,10 +2569,9 @@ async def command_ble_scan(args: argparse.Namespace):
         )
 
         # Calculate how many rows we can show (minimum 10)
-        # At least 10 devices, more if terminal is tall
         max_rows = max(10, height - 12)
 
-        # Display devices
+        # Add rows
         for idx, (addr, info) in enumerate(sorted_devices[:max_rows], 1):
             rssi = info.get("rssi", -99)
             raw_name = info.get("name") or ""
@@ -2577,54 +2581,54 @@ async def command_ble_scan(args: argparse.Namespace):
             age = time.time() - last_seen if last_seen else 999
             tracker = info.get("tracker")
 
-            # Pad/truncate each field to exact width
-            name_str = (raw_name or "(unknown)")[:W_NAME].ljust(W_NAME)
-            vendor_str = raw_vendor[:W_VENDOR].ljust(W_VENDOR)
+            # Name display
+            name_str = raw_name if raw_name else "(unknown)"
 
             # Info column - show tracker type or packet count
             if tracker:
                 info_str = f"⚠{tracker.get('tracker_type', 'TRACK')[:6]}"
             else:
-                info_str = f"{pkts:>5}pk"
-            info_str = info_str[:W_INFO].ljust(W_INFO)
+                info_str = f"{pkts}pk"
 
-            # Color code by signal strength
-            if age > 30:
-                color = "\033[2m"  # Dim for devices not seen in 30s
-            elif rssi >= -50:
-                color = "\033[1;32m"  # Green - excellent
-            elif rssi >= -60:
-                color = "\033[1;92m"  # Light green - good
-            elif rssi >= -70:
-                color = "\033[1;33m"  # Yellow - fair
-            elif rssi >= -80:
-                color = "\033[1;31m"  # Red - weak
-            else:
-                color = "\033[1;90m"  # Gray - very weak
+            # Get style based on RSSI and age
+            style = get_rssi_style(rssi, stale=(age > 30))
 
-            # Build row with explicit field widths
-            row = f"{idx:>{W_NUM}}  {addr:<{W_ADDR}}  {rssi:>{W_RSSI-3}}dBm  {name_str}  {vendor_str}  {info_str}"
-            print(f"{color}  {row}  \033[0m")
+            table.add_row(
+                str(idx),
+                addr,
+                f"{rssi}dBm",
+                name_str,
+                raw_vendor,
+                info_str,
+                style=style,
+            )
 
-        # Fill remaining rows
-        for _ in range(max_rows - len(sorted_devices[:max_rows])):
-            print()
+        # Footer with signal legend
+        footer_text = Text("  ")
+        footer_text.append("Signal:", style="bold underline")
+        footer_text.append("  ")
+        footer_text.append("■", style="bold green")
+        footer_text.append(" >-50  ")
+        footer_text.append("■", style="bright_green")
+        footer_text.append(" >-60  ")
+        footer_text.append("■", style="yellow")
+        footer_text.append(" >-70  ")
+        footer_text.append("■", style="red")
+        footer_text.append(" >-80  ")
+        footer_text.append("■", style="bright_black")
+        footer_text.append(" <-80 dBm   ")
+        footer_text.append("Press Ctrl+C to stop", style="bold yellow")
+        footer = Panel(footer_text, style="cyan", padding=(0, 0))
 
-        # Footer
-        print()
-        print("\033[1;36m" + "-" * width + "\033[0m")
-        print("  \033[1;4mSignal:\033[0m  "
-              "\033[1;32m■\033[0m >-50  "
-              "\033[1;92m■\033[0m >-60  "
-              "\033[1;33m■\033[0m >-70  "
-              "\033[1;31m■\033[0m >-80  "
-              "\033[1;90m■\033[0m <-80 dBm   "
-              "\033[1;33mPress Ctrl+C to stop\033[0m")
-        print("\033[1;36m" + "-" * width + "\033[0m")
-
-        # Ensure output is flushed
-        import sys
-        sys.stdout.flush()
+        return Group(
+            header,
+            Text(""),
+            stats_text,
+            Text(""),
+            table,
+            Text(""),
+            footer,
+        )
 
     def on_advertisement(advertisement):
         """Handle incoming BLE advertisement."""
@@ -2879,39 +2883,41 @@ async def command_ble_scan(args: argparse.Namespace):
                         return
 
         # Main loop - refresh display every second AND enumerate in background
-        if timeout > 0:
-            end_time = time.time() + timeout
-            while time.time() < end_time and running[0]:
-                draw_table()
-                await maybe_enumerate_next()
-                # Safety: if scanning has been paused for more than 15 seconds, force resume
-                if scan_paused_since[0] and (time.time() - scan_paused_since[0]) > 15:
-                    try:
-                        await device.send_command(
-                            HCI_LE_Set_Scan_Enable_Command(
-                                le_scan_enable=1, filter_duplicates=0)
-                        )
-                        scan_paused_since[0] = None
-                        enum_in_progress[0] = False
-                    except Exception:
-                        pass
-                await asyncio.sleep(1)
-        else:
-            while running[0]:
-                draw_table()
-                await maybe_enumerate_next()
-                # Safety: if scanning has been paused for more than 15 seconds, force resume
-                if scan_paused_since[0] and (time.time() - scan_paused_since[0]) > 15:
-                    try:
-                        await device.send_command(
-                            HCI_LE_Set_Scan_Enable_Command(
-                                le_scan_enable=1, filter_duplicates=0)
-                        )
-                        scan_paused_since[0] = None
-                        enum_in_progress[0] = False
-                    except Exception:
-                        pass
-                await asyncio.sleep(1)
+        live_console = Console(force_terminal=True)
+        with Live(generate_live_display(), console=live_console, refresh_per_second=2, vertical_overflow="crop") as live:
+            if timeout > 0:
+                end_time = time.time() + timeout
+                while time.time() < end_time and running[0]:
+                    live.update(generate_live_display())
+                    await maybe_enumerate_next()
+                    # Safety: if scanning has been paused for more than 15 seconds, force resume
+                    if scan_paused_since[0] and (time.time() - scan_paused_since[0]) > 15:
+                        try:
+                            await device.send_command(
+                                HCI_LE_Set_Scan_Enable_Command(
+                                    le_scan_enable=1, filter_duplicates=0)
+                            )
+                            scan_paused_since[0] = None
+                            enum_in_progress[0] = False
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.5)
+            else:
+                while running[0]:
+                    live.update(generate_live_display())
+                    await maybe_enumerate_next()
+                    # Safety: if scanning has been paused for more than 15 seconds, force resume
+                    if scan_paused_since[0] and (time.time() - scan_paused_since[0]) > 15:
+                        try:
+                            await device.send_command(
+                                HCI_LE_Set_Scan_Enable_Command(
+                                    le_scan_enable=1, filter_duplicates=0)
+                            )
+                            scan_paused_since[0] = None
+                            enum_in_progress[0] = False
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.5)
 
     except asyncio.CancelledError:
         pass
@@ -2942,27 +2948,29 @@ async def command_ble_scan(args: argparse.Namespace):
         except Exception:
             pass
 
-    # Clear screen and show final results
-    clear_screen()
-    print("\n\033[1;36m" + "=" * 70 + "\033[0m")
-    print("\033[1;36m  SCAN COMPLETE\033[0m")
-    print("\033[1;36m" + "=" * 70 + "\033[0m\n")
+    # Show final results (Live's screen mode restores terminal on exit)
+    _console.print()
+    _console.print(Rule("SCAN COMPLETE", style="cyan"))
+    _console.print()
 
     elapsed = time.time() - start_time[0] if start_time[0] else 0
-    print(f"  Duration: {elapsed:.1f} seconds")
-    print(f"  Packets received: {packet_count[0]}")
-    print(f"  Unique devices: {len(devices_seen)}\n")
+    _console.print(f"  Duration: {elapsed:.1f} seconds")
+    _console.print(f"  Packets received: {packet_count[0]}")
+    _console.print(f"  Unique devices: {len(devices_seen)}")
+    _console.print()
 
     if not devices_seen:
-        print("  No devices found.\n")
+        _console.print("  No devices found.")
+        _console.print()
         return None
 
     # Count trackers
     tracker_count = sum(1 for _, info in devices_seen.items()
                         if info.get("tracker"))
     if tracker_count > 0:
-        print(
-            f"  \033[1;31m⚠ TRACKERS DETECTED: {tracker_count} potential tracking device(s)\033[0m\n")
+        _console.print(
+            f"  [bold red]⚠ TRACKERS DETECTED: {tracker_count} potential tracking device(s)[/]")
+        _console.print()
 
     # Sort by RSSI descending, then by address for stable ordering
     def sort_key(item):
