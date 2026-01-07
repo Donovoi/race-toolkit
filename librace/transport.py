@@ -315,33 +315,28 @@ class GATTBumbleChecker(BumbleTransport):
                     ln = ln.decode('utf-8', errors='replace')
 
             addr_str = str(adv.address)
-            if addr_str not in device_dict:
-                # Show cleaner format: if we have a name, show it; otherwise just address
-                if ln:
-                    logging.info(
-                        f"  Found: {addr_str}  {ln:<25}  RSSI: {adv.rssi}dBm")
-                else:
-                    logging.info(
-                        f"  Found: {addr_str:<43}  RSSI: {adv.rssi}dBm")
-            # Store name or None (not address as fallback)
-            device_dict[addr_str] = ln
+            # Update device info - keep best name if we get a better one later
+            if addr_str not in device_dict or (ln and not device_dict[addr_str]):
+                device_dict[addr_str] = ln
             rssi_dict[addr_str] = adv.rssi
 
         self.device.on("advertisement", on_adv)
 
         # Start scanning and do so for a defined number of seconds
         # Use active scanning for faster discovery and scan response data
-        logging.info("-" * 60)
         await self.device.start_scanning(
             active=True,  # Active scanning gets more device info
             filter_duplicates=True,
             scan_interval=96,  # 60ms (units of 0.625ms) - faster than default
             scan_window=48     # 30ms duty cycle - good balance
         )
+
+        # Show progress while scanning
+        logging.info("Scanning for %d seconds...", self.scan_time)
         await asyncio.sleep(self.scan_time)
+
         self.device.remove_listener("advertisement", on_adv)
         await self.device.stop_scanning()
-        logging.info("-" * 60)
 
         devices = list(device_dict.items())
         if len(devices) > 0:
