@@ -4561,7 +4561,24 @@ async def command_ble_info(args: argparse.Namespace):
                         break  # Try next address type
                     continue
                 except Exception as e:
+                    err_str = str(e)
                     print(f"  \033[1;31mConnection failed: {e}\033[0m")
+
+                    # Check for errors that indicate we should retry with same address type
+                    retry_errors = [
+                        "UNKNOWN_CONNECTION_IDENTIFIER",
+                        "CONNECTION_FAILED_TO_BE_ESTABLISHED",
+                        "REMOTE_USER_TERMINATED",
+                        "CONNECTION_TIMEOUT",
+                    ]
+                    should_retry = any(err in err_str for err in retry_errors)
+
+                    if should_retry and attempt < max_retries:
+                        print(
+                            f"  \033[0;90m(This error is often transient, retrying...)\033[0m")
+                        await asyncio.sleep(1.0)
+                        continue
+
                     if attempt == max_retries:
                         break  # Try next address type
                     continue
@@ -4612,6 +4629,17 @@ async def command_ble_info(args: argparse.Namespace):
         if not peer or not connection:
             print(
                 f"  \033[1;31mFailed to connect with any address type\033[0m")
+            print(f"\n  \033[1;33mPossible reasons:\033[0m")
+            print(f"    • Device may have changed its MAC address (BLE privacy/RPA)")
+            print(f"    • Device may be out of range or powered off")
+            print(f"    • Device may be connected to another host")
+            print(f"    • Device may require the screen to be unlocked")
+            print(f"\n  \033[1;33mSuggestions:\033[0m")
+            print(
+                f"    • Run '\033[1;36mble-scan\033[0m' again to find the current address")
+            print(f"    • Make sure the device is discoverable (BT settings open)")
+            print(f"    • Try moving closer to the device")
+            print(f"    • Disconnect the device from other paired hosts")
             return
 
         # Collect device info
@@ -5537,6 +5565,15 @@ async def command_ble_speaker(args: argparse.Namespace):
         if connection is None:
             print(
                 f"  \033[1;31mFailed to connect with any address type\033[0m")
+            print(f"\n  \033[1;33mPossible reasons:\033[0m")
+            print(f"    • Device may have changed its MAC address (BLE privacy/RPA)")
+            print(f"    • Device may be out of range or powered off")
+            print(f"    • Device may be connected to another host")
+            print(f"\n  \033[1;33mSuggestions:\033[0m")
+            print(
+                f"    • Run '\033[1;36mble-scan\033[0m' again to find the current address")
+            print(f"    • Make sure the device is in pairing/discoverable mode")
+            print(f"    • Try moving closer to the device")
             return
 
         # Discover services
