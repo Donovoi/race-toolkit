@@ -548,7 +548,7 @@ async def scan_classic_devices(
         def on_inquiry_result(
             address: Address,
             _class_of_device: int,
-            data: dict[int, bytes | str],
+            data: dict[int, bytes | bytearray | memoryview | str],
             _rssi: int,
         ) -> None:
             addr_str = str(address)
@@ -557,9 +557,11 @@ async def scan_classic_devices(
             if not name:
                 name = data.get(0x08)  # Shortened Local Name
             if name:
-                if isinstance(name, bytes):
-                    name = name.decode("utf-8", errors="replace")
-                devices[addr_str] = name
+                if isinstance(name, (bytes, bytearray, memoryview)):
+                    name_str = bytes(name).decode("utf-8", errors="replace")
+                else:
+                    name_str = str(name)
+                devices[addr_str] = name_str
             elif addr_str not in devices:
                 devices[addr_str] = "(unknown)"
 
@@ -2458,7 +2460,7 @@ async def command_ble_scan(args: argparse.Namespace):
         """
         result = {}
 
-        company_id, _payload = normalize_mfr_data(mfr_data)
+        company_id, payload = normalize_mfr_data(mfr_data)
         if company_id is None or company_id != 0x004C:  # Apple
             return result
 
@@ -2603,6 +2605,8 @@ async def command_ble_scan(args: argparse.Namespace):
             service_uuids = data.get(
                 AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS
             )
+        if not isinstance(service_uuids, (bytes, bytearray, memoryview, list)):
+            service_uuids = None
 
         for uuid16 in _extract_16bit_service_uuids(service_uuids):
             if uuid16 in TRACKER_SERVICES:
@@ -2643,6 +2647,8 @@ async def command_ble_scan(args: argparse.Namespace):
             AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
         ]:
             service_uuids = data.get(uuid_type)
+            if not isinstance(service_uuids, (bytes, bytearray, memoryview, list)):
+                service_uuids = None
             uuid16s = _extract_16bit_service_uuids(service_uuids)
             if uuid16s:
                 details["service_uuids"] = [f"0x{uuid16:04X}" for uuid16 in uuid16s]
@@ -8406,11 +8412,9 @@ async def command_hfp_demo(args: argparse.Namespace):
                         logging.debug("Enhanced SCO setup response: %s", response)
 
                         # Check if controller supports the enhanced command
-                        if hasattr(response, "return_parameters"):
-                            if (
-                                response.return_parameters
-                                == HCI_UNKNOWN_HCI_COMMAND_ERROR
-                            ):
+                        response_params = getattr(response, "return_parameters", None)
+                        if response_params is not None:
+                            if response_params == HCI_UNKNOWN_HCI_COMMAND_ERROR:
                                 logging.warning(
                                     "Controller doesn't support Enhanced SCO setup"
                                 )
@@ -8449,21 +8453,21 @@ async def command_hfp_demo(args: argparse.Namespace):
                                 logging.debug("Legacy SCO setup response: %s", response)
 
                                 # Check response
-                                if hasattr(response, "return_parameters"):
-                                    if (
-                                        response.return_parameters
-                                        == HCI_UNKNOWN_HCI_COMMAND_ERROR
-                                    ):
+                                legacy_params = getattr(
+                                    response, "return_parameters", None
+                                )
+                                if legacy_params is not None:
+                                    if legacy_params == HCI_UNKNOWN_HCI_COMMAND_ERROR:
                                         logging.error(
                                             "Controller doesn't support legacy SCO either!"
                                         )
                                         raise RuntimeError(
                                             "No SCO command supported by controller"
                                         )
-                                    elif response.return_parameters != 0:
+                                    elif legacy_params != 0:
                                         logging.warning(
                                             "Legacy SCO setup returned: 0x%02X",
-                                            response.return_parameters,
+                                            legacy_params,
                                         )
                                     else:
                                         logging.info("Legacy SCO command accepted!")
@@ -8472,10 +8476,10 @@ async def command_hfp_demo(args: argparse.Namespace):
                                     # Command status event - command pending
                                     logging.info("Legacy SCO command sent (pending)")
                                     sco_setup_success = True
-                            elif response.return_parameters != 0:
+                            elif response_params != 0:
                                 logging.warning(
                                     "Enhanced SCO setup returned error: 0x%02X",
-                                    response.return_parameters,
+                                    response_params,
                                 )
                             else:
                                 logging.info("Enhanced SCO command accepted!")
