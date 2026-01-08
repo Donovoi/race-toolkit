@@ -61,6 +61,7 @@ from librace.util import setup_logging
 from librace.parttable import parse_partition_table
 
 # Rich library for beautiful table formatting
+from rich.box import Box
 from rich.console import Console, Group
 from rich.table import Table
 from rich.text import Text
@@ -72,7 +73,9 @@ from rich.rule import Rule
 _console = Console(force_terminal=True)
 
 
-def create_table(columns: list, title: str = None, box_style=None) -> Table:
+def create_table(
+    columns: list, title: str | None = None, box_style: Box | None = None
+) -> Table:
     """Create a rich Table with consistent styling.
 
     Args:
@@ -1067,8 +1070,8 @@ async def _send_race_command(
     r: RACE,
     packet,
     outfile: str | None,
-    log_request: str = None,
-    log_response: str = None,
+    log_request: str | None = None,
+    log_response: str | None = None,
     display_func=None,
 ) -> bytes:
     """Send a RACE command and handle output.
@@ -1097,7 +1100,7 @@ async def _send_race_command(
     return response
 
 
-def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict = None):
+def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict | None = None):
     """Display BLE devices in a table format and let user select one.
 
     Args:
@@ -2199,7 +2202,7 @@ async def command_ble_scan(args: argparse.Namespace):
         HCI_LE_Set_Scan_Parameters_Command,
         HCI_LE_Set_Scan_Enable_Command,
     )
-    from bumble.core import AdvertisingData
+    from bumble.core import AdvertisingData, UUID as BumbleUUID
     import shutil
 
     controller = args.controller or "usb:0"
@@ -2213,11 +2216,11 @@ async def command_ble_scan(args: argparse.Namespace):
     release_bluetooth_controller(controller)
 
     devices_seen: dict[str, dict] = {}
-    packet_count = [0]
-    start_time = [None]
-    running = [True]
-    enum_in_progress = [False]  # Track if enumeration is happening
-    scan_paused_since = [None]  # Track when scanning was paused
+    packet_count: list[int] = [0]
+    start_time: list[float | None] = [None]
+    running: list[bool] = [True]
+    enum_in_progress: list[bool] = [False]  # Track if enumeration is happening
+    scan_paused_since: list[float | None] = [None]  # Track when scanning was paused
     device = None
     t = None
 
@@ -2547,6 +2550,22 @@ async def command_ble_scan(args: argparse.Namespace):
 
         return result
 
+    def _extract_16bit_service_uuids(service_uuids) -> list[int]:
+        """Extract 16-bit service UUIDs from raw bytes or UUID objects."""
+        uuid16s: list[int] = []
+        if isinstance(service_uuids, (bytes, bytearray, memoryview)):
+            data_bytes = bytes(service_uuids)
+            for i in range(0, len(data_bytes), 2):
+                if i + 1 < len(data_bytes):
+                    uuid16s.append(struct.unpack("<H", data_bytes[i : i + 2])[0])
+        elif isinstance(service_uuids, list):
+            for uuid in service_uuids:
+                if isinstance(uuid, BumbleUUID):
+                    uuid_bytes = uuid.to_bytes()
+                    if len(uuid_bytes) == 2:
+                        uuid16s.append(int.from_bytes(uuid_bytes, "little"))
+        return uuid16s
+
     def detect_tracker(data: AdvertisingData) -> dict:
         """Detect if device is a tracker (AirTag, Tile, Chipolo, etc).
 
@@ -2579,17 +2598,13 @@ async def command_ble_scan(args: argparse.Namespace):
                 AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS
             )
 
-        if service_uuids and isinstance(service_uuids, bytes):
-            # Parse 16-bit UUIDs (2 bytes each, little-endian)
-            for i in range(0, len(service_uuids), 2):
-                if i + 1 < len(service_uuids):
-                    uuid16 = struct.unpack("<H", service_uuids[i : i + 2])[0]
-                    if uuid16 in TRACKER_SERVICES:
-                        result["is_tracker"] = True
-                        result["tracker_type"] = (
-                            result.get("tracker_type") or TRACKER_SERVICES[uuid16]
-                        )
-                        result["tracker_service"] = f"0x{uuid16:04X}"
+        for uuid16 in _extract_16bit_service_uuids(service_uuids):
+            if uuid16 in TRACKER_SERVICES:
+                result["is_tracker"] = True
+                result["tracker_type"] = (
+                    result.get("tracker_type") or TRACKER_SERVICES[uuid16]
+                )
+                result["tracker_service"] = f"0x{uuid16:04X}"
 
         return result
 
@@ -2622,14 +2637,9 @@ async def command_ble_scan(args: argparse.Namespace):
             AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
         ]:
             service_uuids = data.get(uuid_type)
-            if service_uuids and isinstance(service_uuids, bytes):
-                uuids = []
-                for i in range(0, len(service_uuids), 2):
-                    if i + 1 < len(service_uuids):
-                        uuid16 = struct.unpack("<H", service_uuids[i : i + 2])[0]
-                        uuids.append(f"0x{uuid16:04X}")
-                if uuids:
-                    details["service_uuids"] = uuids
+            uuid16s = _extract_16bit_service_uuids(service_uuids)
+            if uuid16s:
+                details["service_uuids"] = [f"0x{uuid16:04X}" for uuid16 in uuid16s]
                 break
 
         # TX Power Level
@@ -4978,7 +4988,7 @@ def format_characteristic_value(
         return f"[{len(value)} bytes] {value.hex()[:32]}..."
 
 
-async def command_ble_info(args: argparse.Namespace):
+async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportGeneralTypeIssues]
     """Enumerate BLE device information by connecting and reading GATT services.
 
     Connects to a BLE device and reads:
@@ -7151,6 +7161,7 @@ async def command_avrcp(args: argparse.Namespace):
     from bumble.hci import Address
     from bumble.core import BT_BR_EDR_TRANSPORT
     from bumble import avrcp, avc
+    from bumble.avrcp import StatusCode
 
     controller = args.controller or "usb:0"
     target_address = args.target_address
@@ -7265,6 +7276,11 @@ async def command_avrcp(args: argparse.Namespace):
         await checker.close()
         return
 
+    if checker.connection is None:
+        await checker.close()
+        logging.error("No connection established")
+        return
+
     connection = checker.connection
     avrcp_protocol = None
 
@@ -7300,7 +7316,7 @@ async def command_avrcp(args: argparse.Namespace):
                 return []
 
             async def inform_battery_status_of_ct(self, battery_status):
-                return avrcp.StatusCode.SUCCESS
+                return StatusCode.OPERATION_COMPLETED
 
             async def set_absolute_volume(self, volume):
                 self.volume = volume
@@ -7336,6 +7352,10 @@ async def command_avrcp(args: argparse.Namespace):
                     checker = RFCOMMBumbleChecker(controller, target_address, False)
                     await checker.setup()
 
+                    if checker.device is None:
+                        print("    \033[0;31m✗ Bluetooth device not initialized\033[0m")
+                        return
+
                     try:
                         checker.connection = await asyncio.wait_for(
                             checker.device.connect(
@@ -7343,6 +7363,8 @@ async def command_avrcp(args: argparse.Namespace):
                             ),
                             timeout=timeout,
                         )
+                        if checker.connection is None:
+                            raise RuntimeError("No connection established")
                         connection = checker.connection
                         print(f"    \033[1;32m✓ Reconnected!\033[0m")
                     except Exception as reconn_err:
@@ -7610,6 +7632,13 @@ async def command_enumerate_classic(args: argparse.Namespace):
     if not connected:
         return
 
+    if checker.connection is None:
+        await checker.close()
+        logging.error("No connection established")
+        return
+
+    connection = checker.connection
+
     logging.info("Connected successfully WITHOUT pairing!")
     logging.info("")
     logging.info("-" * 60)
@@ -7618,7 +7647,7 @@ async def command_enumerate_classic(args: argparse.Namespace):
 
     # Get device name
     try:
-        name = await checker.connection.request_remote_name()
+        name = await connection.request_remote_name()
         logging.info("Device Name: %s", name)
     except Exception:  # pylint: disable=broad-exception-caught
         logging.info("Device Name: (could not retrieve)")
@@ -7627,7 +7656,7 @@ async def command_enumerate_classic(args: argparse.Namespace):
     from bumble.rfcomm import find_rfcomm_channels
     from bumble.core import UUID as BumbleUUID
 
-    channels = await find_rfcomm_channels(checker.connection)
+    channels = await find_rfcomm_channels(connection)
 
     def format_uuid(uuid_obj) -> str:
         """Format a UUID object to a readable string with name if known."""
@@ -7666,7 +7695,7 @@ async def command_enumerate_classic(args: argparse.Namespace):
     try:
         from bumble.hfp import find_hf_sdp_record
 
-        hfp_record = await find_hf_sdp_record(checker.connection)
+        hfp_record = await find_hf_sdp_record(connection)
         if hfp_record:
             channel, _, _ = hfp_record
             logging.info("  HFP (Hands-Free Profile): Channel %d - ACCESSIBLE", channel)
@@ -8328,6 +8357,8 @@ async def command_hfp_demo(args: argparse.Namespace):
 
                         # Register SCO event handlers
                         device = checker.device
+                        if device is None:
+                            raise RuntimeError("Bluetooth device not initialized")
                         device.on("sco_connection", on_sco_connection)
                         device.on("sco_connection_failure", on_sco_failure)
 
@@ -8846,6 +8877,12 @@ async def command_buildversion(r: RACE, outfile: str):
         log_response="Got build version response",
         display_func=display_version,
     )
+
+
+async def _get_buildversion(r: RACE) -> bytes:
+    """Retrieve build version response bytes without displaying output."""
+    await r.setup()
+    return await r.send_sync(BuildVersion())
 
 
 async def _read_media_attr(d: RACEDumper, addr: int) -> str:
