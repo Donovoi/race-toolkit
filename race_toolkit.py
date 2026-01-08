@@ -19,6 +19,7 @@ import fcntl
 
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Any, Callable, cast
 
 try:
     from usb1 import USBErrorBusy  # type: ignore[import-not-found]
@@ -159,7 +160,7 @@ def sanitize_display(value: str) -> str:
     return "".join(char for char in str(value) if 32 <= ord(char) <= 126)
 
 
-def sanitize_address(addr) -> str:
+def sanitize_address(addr: object) -> str:
     """Extract clean MAC address from Bumble Address object.
 
     Bumble's Address.__str__() may include special unicode characters
@@ -385,7 +386,6 @@ def reset_usb_bluetooth_controller(controller: str) -> bool:
     except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning("USB reset failed: %s", e)
         return False
-        return False
 
 
 def _reset_hci_controller(hci_device: str = "hci0") -> bool:
@@ -546,11 +546,11 @@ async def scan_classic_devices(
         await device.power_on()
 
         def on_inquiry_result(
-            address,
-            class_of_device,
-            data,
-            rssi,  # pylint: disable=unused-argument
-        ):
+            address: Address,
+            _class_of_device: int,
+            data: dict[int, bytes | str],
+            _rssi: int,
+        ) -> None:
             addr_str = str(address)
             # Try to get name from Extended Inquiry Response
             name = data.get(0x09)  # Complete Local Name
@@ -1006,7 +1006,11 @@ def _get_vuln(vulnerabilities: list[Vulnerability], vuln_id: str) -> Vulnerabili
     raise KeyError(f"Vulnerability {vuln_id} not found")
 
 
-def _write_or_display(data: bytes, outfile: str | None, display_func=None):
+def _write_or_display(
+    data: bytes,
+    outfile: str | None,
+    display_func: Callable[[bytes], None] | None = None,
+) -> None:
     """Write data to file or display it.
 
     Args:
@@ -1026,7 +1030,7 @@ def _write_or_display(data: bytes, outfile: str | None, display_func=None):
 
 
 async def _dump_memory(
-    dumper_class,
+    dumper_class: type[RACERAMDumper] | type[RACEFlashDumper],
     r: RACE,
     address: int,
     size: int,
@@ -1068,11 +1072,11 @@ async def _dump_memory(
 
 async def _send_race_command(
     r: RACE,
-    packet,
+    packet: RacePacket,
     outfile: str | None,
     log_request: str | None = None,
     log_response: str | None = None,
-    display_func=None,
+    display_func: Callable[[bytes], None] | None = None,
 ) -> bytes:
     """Send a RACE command and handle output.
 
@@ -1413,7 +1417,7 @@ async def command_check(args: argparse.Namespace):
 
             devices_found = {}
 
-            def on_ble_device(device, adv_data):
+            def on_ble_device(device: Any, adv_data: Any) -> None:
                 addr_str = device.address
                 name = device.name or adv_data.local_name or "(unknown)"
                 rssi = adv_data.rssi
@@ -1491,8 +1495,8 @@ async def command_check(args: argparse.Namespace):
                             "BLE connection was cancelled. The device may have disconnected."
                         )
                         uuid_found = False
-                    except (OSError, ConnectionError, BrokenPipeError) as e:
-                        logging.warning("BLE connection error: %s", e)
+                    except (OSError, ConnectionError, BrokenPipeError) as err:
+                        logging.warning("BLE connection error: %s", err)
                         uuid_found = False
 
                     if uuid_found:
@@ -1534,10 +1538,10 @@ async def command_check(args: argparse.Namespace):
                                 "Timeout! Unable to dump flash within 10 seconds. "
                                 "Device might be fixed!"
                             )
-                        except (OSError, ConnectionError, BrokenPipeError) as e:
+                        except (OSError, ConnectionError, BrokenPipeError) as err:
                             logging.warning(
                                 "Unable to dump flash. Device might be fixed! Error is %s",
-                                e,
+                                err,
                             )
                         _get_vuln(vulnerabilities, "CVE-2025-20702_LE").status = status
 
@@ -1563,8 +1567,8 @@ async def command_check(args: argparse.Namespace):
                                     "address within 8 seconds. The RACE command might "
                                     "be unavailable, which is expected for many devices."
                                 )
-                            except (OSError, ConnectionError, BrokenPipeError) as e:
-                                logging.warning("Error receiving BD addr: %s.", e)
+                            except (OSError, ConnectionError, BrokenPipeError) as err:
+                                logging.warning("Error receiving BD addr: %s.", err)
 
                         await le_transport.close()
                         await le_checker.close()
@@ -1586,8 +1590,8 @@ async def command_check(args: argparse.Namespace):
                 "BLE scanning requires 'bleak' package. Install with: pip install bleak"
             )
             logging.info("Falling back to skipping BLE checks.")
-        except Exception as e:
-            error_msg = str(e)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            error_msg = str(exc)
             if (
                 "No Bluetooth adapters found" in error_msg
                 or "NO_BLUETOOTH" in error_msg
@@ -1627,8 +1631,8 @@ async def command_check(args: argparse.Namespace):
                                 "BLE connection was cancelled. The device may have disconnected."
                             )
                             uuid_found = False
-                        except (OSError, ConnectionError, BrokenPipeError) as e:
-                            logging.warning("BLE connection error: %s", e)
+                        except (OSError, ConnectionError, BrokenPipeError) as err:
+                            logging.warning("BLE connection error: %s", err)
                             uuid_found = False
 
                         if uuid_found:
@@ -1670,10 +1674,10 @@ async def command_check(args: argparse.Namespace):
                                     "Timeout! Unable to dump flash within 10 seconds. "
                                     "Device might be fixed!"
                                 )
-                            except (OSError, ConnectionError, BrokenPipeError) as e:
+                            except (OSError, ConnectionError, BrokenPipeError) as err:
                                 logging.warning(
                                     "Unable to dump flash. Device might be fixed! Error is %s",
-                                    e,
+                                    err,
                                 )
                             _get_vuln(
                                 vulnerabilities, "CVE-2025-20702_LE"
@@ -1703,8 +1707,12 @@ async def command_check(args: argparse.Namespace):
                                         "address within 8 seconds. The RACE command might "
                                         "be unavailable, which is expected for many devices."
                                     )
-                                except (OSError, ConnectionError, BrokenPipeError) as e:
-                                    logging.warning("Error receiving BD addr: %s.", e)
+                                except (
+                                    OSError,
+                                    ConnectionError,
+                                    BrokenPipeError,
+                                ) as err:
+                                    logging.warning("Error receiving BD addr: %s.", err)
 
                             await le_transport.close()
                             await le_checker.close()
@@ -1722,11 +1730,11 @@ async def command_check(args: argparse.Namespace):
                     else:
                         logging.info("No BLE device selected. Skipping BLE checks.")
 
-                except Exception as fallback_error:
-                    logging.error("Bumble scanning also failed: %s", fallback_error)
+                except Exception as fallback_exc:  # pylint: disable=broad-exception-caught
+                    logging.error("Bumble scanning also failed: %s", fallback_exc)
                     logging.info("Skipping BLE checks.")
             else:
-                logging.error("BLE scan failed: %s", e)
+                logging.error("BLE scan failed: %s", exc)
                 logging.info("Skipping BLE checks.")
 
     # Ask user if they want to continue with Bluetooth Classic
@@ -1916,7 +1924,7 @@ async def command_check(args: argparse.Namespace):
     try:
         if "classic_checker" in locals() and classic_checker:
             await classic_checker.close()
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         logging.debug("Error closing classic_checker: %s", e)
 
     # Give USB transfers time to complete before event loop closes
@@ -2048,15 +2056,20 @@ async def command_scan(args: argparse.Namespace):
                         HCI_Write_Inquiry_Mode_Command(inquiry_mode=2)
                     )
                     logging.debug("Extended Inquiry Mode enabled")
-                except Exception as e:
+                except Exception as e:  # pylint: disable=broad-exception-caught
                     logging.debug("Could not enable extended inquiry: %s", e)
 
-            def on_inquiry_result(address, class_of_device, data, rssi):
+            def on_inquiry_result(
+                address: Address,
+                class_of_device: int,
+                data: dict[int, bytes | str],
+                rssi: int,
+            ) -> None:
                 addr_str = str(address)
 
                 # Parse Class of Device
                 cod_major = (class_of_device >> 8) & 0x1F
-                cod_minor = (class_of_device >> 2) & 0x3F
+                _cod_minor = (class_of_device >> 2) & 0x3F
                 major_classes = {
                     0: "Miscellaneous",
                     1: "Computer",
@@ -2108,7 +2121,7 @@ async def command_scan(args: argparse.Namespace):
             await t.close()
             logging.info("-" * 60)
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("Classic scan failed: %s", e)
 
     if mode in ("ble", "both"):
@@ -2120,7 +2133,7 @@ async def command_scan(args: argparse.Namespace):
         try:
             from bleak import BleakScanner
 
-            def on_ble_device(device, adv_data):
+            def on_ble_device(device: Any, adv_data: Any) -> None:
                 addr_str = device.address
                 name = device.name or adv_data.local_name or "(unknown)"
                 rssi = adv_data.rssi
@@ -2148,7 +2161,7 @@ async def command_scan(args: argparse.Namespace):
 
         except ImportError:
             logging.error("BLE scanning requires 'bleak' package")
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("BLE scan failed: %s", e)
 
     # Summary
@@ -2210,7 +2223,7 @@ async def command_ble_scan(args: argparse.Namespace):
     name_filter = getattr(args, "filter", None)
     addr_filter = getattr(args, "filter_addr", None)
     show_raw = getattr(args, "show_raw", False)
-    show_uuids = getattr(args, "show_uuids", False)
+    _show_uuids = getattr(args, "show_uuids", False)
 
     # Release Bluetooth controller
     release_bluetooth_controller(controller)
@@ -2227,7 +2240,7 @@ async def command_ble_scan(args: argparse.Namespace):
     # Set up signal handler for clean Ctrl+C exit
     import signal
 
-    def signal_handler(sig, frame):
+    def signal_handler(_sig: int, _frame: object) -> None:
         running[0] = False
 
     original_handler = signal.signal(signal.SIGINT, signal_handler)
@@ -2392,19 +2405,6 @@ async def command_ble_scan(args: argparse.Namespace):
         0xFD69: "Samsung",
     }
 
-    def get_signal_bars(rssi: int) -> str:
-        """Convert RSSI to signal strength bars."""
-        if rssi >= -50:
-            return "████"  # Excellent
-        elif rssi >= -60:
-            return "███░"  # Good
-        elif rssi >= -70:
-            return "██░░"  # Fair
-        elif rssi >= -80:
-            return "█░░░"  # Weak
-        else:
-            return "░░░░"  # Very weak
-
     def get_manufacturer(data: AdvertisingData) -> str:
         """Extract manufacturer from advertising data."""
         mfr_data = data.get(AdvertisingData.MANUFACTURER_SPECIFIC_DATA)
@@ -2418,7 +2418,9 @@ async def command_ble_scan(args: argparse.Namespace):
                 return COMPANIES.get(company_id, f"0x{company_id:04X}")
         return ""
 
-    def normalize_mfr_data(mfr_data):
+    def normalize_mfr_data(
+        mfr_data: tuple[int, bytes] | bytes | None,
+    ) -> tuple[int | None, bytes | None]:
         """Normalize manufacturer data to (company_id, payload_bytes) tuple.
 
         Bumble may return either:
@@ -2442,7 +2444,9 @@ async def command_ble_scan(args: argparse.Namespace):
 
         return None, None
 
-    def parse_apple_continuity(mfr_data) -> dict:
+    def parse_apple_continuity(
+        mfr_data: tuple[int, bytes] | bytes | None,
+    ) -> dict:
         """Parse Apple Continuity protocol from manufacturer data.
 
         Apple uses Company ID 0x004C. Message format:
@@ -2454,7 +2458,7 @@ async def command_ble_scan(args: argparse.Namespace):
         """
         result = {}
 
-        company_id, payload = normalize_mfr_data(mfr_data)
+        company_id, _payload = normalize_mfr_data(mfr_data)
         if company_id is None or company_id != 0x004C:  # Apple
             return result
 
@@ -2545,12 +2549,14 @@ async def command_ble_scan(args: argparse.Namespace):
                 result["proximity_pairing"] = True
                 # Device model info is encoded but proprietary
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             result["parse_error"] = str(e)
 
         return result
 
-    def _extract_16bit_service_uuids(service_uuids) -> list[int]:
+    def _extract_16bit_service_uuids(
+        service_uuids: bytes | bytearray | memoryview | list[BumbleUUID] | None,
+    ) -> list[int]:
         """Extract 16-bit service UUIDs from raw bytes or UUID objects."""
         uuid16s: list[int] = []
         if isinstance(service_uuids, (bytes, bytearray, memoryview)):
@@ -2575,7 +2581,7 @@ async def command_ble_scan(args: argparse.Namespace):
 
         # Check manufacturer data for Apple trackers
         mfr_data = data.get(AdvertisingData.MANUFACTURER_SPECIFIC_DATA)
-        company_id, payload = normalize_mfr_data(mfr_data)
+        company_id, _payload = normalize_mfr_data(mfr_data)
 
         if company_id is not None:
             # Parse Apple Continuity for FindMy/iBeacon
@@ -2664,7 +2670,7 @@ async def command_ble_scan(args: argparse.Namespace):
         # Stats line with enumeration/scan status
         elapsed = time.time() - start_time[0] if start_time[0] else 0
         stats_text = Text("  ")
-        stats_text.append(f"Devices: ", style="default")
+        stats_text.append("Devices: ", style="default")
         stats_text.append(f"{len(devices_seen)}", style="bold yellow")
         stats_text.append("  |  Packets: ", style="default")
         stats_text.append(f"{packet_count[0]}", style="bold yellow")
@@ -2772,7 +2778,7 @@ async def command_ble_scan(args: argparse.Namespace):
             footer,
         )
 
-    def on_advertisement(advertisement):
+    def on_advertisement(advertisement: Any) -> None:
         """Handle incoming BLE advertisement."""
         packet_count[0] += 1
         if start_time[0] is None:
@@ -2961,7 +2967,7 @@ async def command_ble_scan(args: argparse.Namespace):
                         service_types.append("HID")
                     elif "180d" in suuid:
                         service_types.append("Heart Rate")
-                    elif "180f" in suuid:
+                    elif "180" in suuid:
                         service_types.append("Battery")
                     elif "1108" in suuid or "110b" in suuid or "110a" in suuid:
                         service_types.append("Audio")
@@ -3006,7 +3012,7 @@ async def command_ble_scan(args: argparse.Namespace):
                                     info["model"] = value.decode(
                                         "utf-8", errors="replace"
                                     )
-                        except Exception:
+                        except Exception:  # pylint: disable=broad-exception-caught
                             pass
 
                 if service_types:
@@ -3014,13 +3020,13 @@ async def command_ble_scan(args: argparse.Namespace):
 
             except asyncio.TimeoutError:
                 info["connectable"] = False
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 info["connectable"] = False
             finally:
                 try:
                     if connection:
                         await connection.disconnect()
-                except Exception:
+                except Exception:  # pylint: disable=broad-exception-caught
                     pass
                 # Resume scanning
                 try:
@@ -3030,7 +3036,7 @@ async def command_ble_scan(args: argparse.Namespace):
                         )
                     )
                     scan_paused_since[0] = None
-                except Exception:
+                except Exception:  # pylint: disable=broad-exception-caught
                     pass
                 enum_in_progress[0] = False
 
@@ -3085,7 +3091,7 @@ async def command_ble_scan(args: argparse.Namespace):
                             )
                             scan_paused_since[0] = None
                             enum_in_progress[0] = False
-                        except Exception:
+                        except Exception:  # pylint: disable=broad-exception-caught
                             pass
                     await asyncio.sleep(0.5)
             else:
@@ -3105,7 +3111,7 @@ async def command_ble_scan(args: argparse.Namespace):
                             )
                             scan_paused_since[0] = None
                             enum_in_progress[0] = False
-                        except Exception:
+                        except Exception:  # pylint: disable=broad-exception-caught
                             pass
                     await asyncio.sleep(0.5)
 
@@ -3113,17 +3119,15 @@ async def command_ble_scan(args: argparse.Namespace):
         pass
     except KeyboardInterrupt:
         pass
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         logging.error("BLE scan failed: %s", e)
-        import traceback
-
         traceback.print_exc()
     finally:
         running[0] = False
         # Restore original signal handler
         try:
             signal.signal(signal.SIGINT, original_handler)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
         try:
             if device:
@@ -3136,7 +3140,7 @@ async def command_ble_scan(args: argparse.Namespace):
             # Close transport - enumeration already happened during scanning
             if t:
                 await t.close()
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
 
     # Show final results (Live's screen mode restores terminal on exit)
@@ -3164,7 +3168,7 @@ async def command_ble_scan(args: argparse.Namespace):
         _console.print()
 
     # Sort by RSSI descending, then by address for stable ordering
-    def sort_key(item):
+    def sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
         addr, info = item
         rssi = info.get("rssi", -999)
         # Return (rssi, addr) - rssi descending (negate), addr ascending
@@ -3316,7 +3320,7 @@ async def command_ble_scan(args: argparse.Namespace):
                                 f"    WiFi: {'On' if ni.get('wifi_on') else 'Off'}, Screen: {'On' if ni.get('screen_on') else 'Off'}"
                             )
                             if ni.get("airdrop_enabled"):
-                                print(f"    AirDrop: Enabled")
+                                print("    AirDrop: Enabled")
                         if apple.get("airplay_ip"):
                             print(f"    AirPlay IP: {apple['airplay_ip']}")
                         if apple.get("nearby_action"):
@@ -3331,7 +3335,7 @@ async def command_ble_scan(args: argparse.Namespace):
                         )
 
                     print(
-                        f"\n  \033[1;37mYou can now use this address with other commands:\033[0m"
+                        "\n  \033[1;37mYou can now use this address with other commands:\033[0m"
                     )
                     print(f"  \033[1;36m  --target-address {selected_addr}\033[0m")
                     print(
@@ -3339,9 +3343,9 @@ async def command_ble_scan(args: argparse.Namespace):
                     )
                     return selected_addr
                 else:
-                    print(f"\n  \033[1;31mInvalid selection.\033[0m\n")
+                    print("\n  \033[1;31mInvalid selection.\033[0m\n")
             except ValueError:
-                print(f"\n  \033[1;31mInvalid input.\033[0m\n")
+                print("\n  \033[1;31mInvalid input.\033[0m\n")
     except (EOFError, KeyboardInterrupt):
         print("\n  \033[1;33mExiting...\033[0m\n")
         return None
@@ -3388,7 +3392,7 @@ async def lookup_oui_vendor(mac_address: str) -> dict:
                 result["vendor"] = vendor
                 result["source"] = "macvendors.com"
                 return result
-    except Exception:
+    except (urllib.error.URLError, TimeoutError, ValueError):
         pass
 
     # Try maclookup.app API as fallback
@@ -3402,7 +3406,7 @@ async def lookup_oui_vendor(mac_address: str) -> dict:
                 result["address"] = data.get("address")
                 result["source"] = "maclookup.app"
                 return result
-    except Exception:
+    except (urllib.error.URLError, TimeoutError, ValueError):
         pass
 
     return result
@@ -4285,6 +4289,7 @@ async def search_web_for_uuid(uuid: str) -> dict:
     """
     import urllib.request
     import urllib.parse
+    import urllib.error
     import re
 
     uuid_lower = uuid.lower()
@@ -4362,7 +4367,7 @@ async def search_web_for_uuid(uuid: str) -> dict:
 
             if results:
                 return {"web_results": results, "source": "DuckDuckGo Search"}
-    except Exception:
+    except (urllib.error.URLError, TimeoutError, ValueError):
         pass
 
     return {}
@@ -4408,7 +4413,7 @@ async def search_uuid_github(uuid: str) -> list:
                             "source": "GitHub",
                         }
                     )
-    except Exception:
+    except (urllib.error.URLError, TimeoutError, ValueError):
         pass
 
     return results
@@ -4424,6 +4429,7 @@ async def search_nordic_database(uuid: str) -> dict:
         Dictionary with characteristic info if found
     """
     import urllib.request
+    import urllib.error
     import json
 
     # Nordic maintains a public JSON database
@@ -4441,7 +4447,7 @@ async def search_nordic_database(uuid: str) -> dict:
                         "identifier": entry.get("identifier"),
                         "source": "Nordic Bluetooth Numbers Database",
                     }
-    except Exception:
+    except (urllib.error.URLError, TimeoutError, ValueError):
         pass
 
     return {}
@@ -4536,8 +4542,6 @@ async def research_unknown_characteristics(
     Returns:
         Dictionary with all research results
     """
-    import urllib.parse
-
     research = {
         "oui_lookup": None,
         "pattern_analysis": None,
@@ -4549,23 +4553,23 @@ async def research_unknown_characteristics(
     }
 
     # Lookup OUI vendor
-    print(f"\n  \033[1;36m⟳ Looking up device manufacturer from MAC OUI...\033[0m")
+    print("\n  \033[1;36m⟳ Looking up device manufacturer from MAC OUI...\033[0m")
     research["oui_lookup"] = await lookup_oui_vendor(mac_address)
 
     # Analyze UUID patterns
-    print(f"  \033[1;36m⟳ Analyzing UUID patterns...\033[0m")
+    print("  \033[1;36m⟳ Analyzing UUID patterns...\033[0m")
     uuids = [uuid for uuid, _, _ in unknown_chars]
     research["pattern_analysis"] = await analyze_uuid_patterns(uuids)
 
     # Search Nordic database for each UUID (rate limited)
-    print(f"  \033[1;36m⟳ Searching Nordic Bluetooth Numbers Database...\033[0m")
+    print("  \033[1;36m⟳ Searching Nordic Bluetooth Numbers Database...\033[0m")
     for uuid, props, svc in unknown_chars[:10]:  # Limit to first 10
         result = await search_nordic_database(uuid)
         if result:
             research["nordic_results"][uuid] = result
 
     # Search GitHub for first 3 unique base patterns (to avoid rate limits)
-    print(f"  \033[1;36m⟳ Searching GitHub for UUID references...\033[0m")
+    print("  \033[1;36m⟳ Searching GitHub for UUID references...\033[0m")
     searched_bases = set()
     for uuid, props, svc in unknown_chars:
         if len(searched_bases) >= 3:
@@ -4580,7 +4584,7 @@ async def research_unknown_characteristics(
             await asyncio.sleep(0.5)  # Rate limit
 
     # Search known BLE specifications and web for ALL UUIDs
-    print(f"  \033[1;36m⟳ Searching known BLE specifications and web...\033[0m")
+    print("  \033[1;36m⟳ Searching known BLE specifications and web...\033[0m")
     search_count = 0
     for uuid, props, svc in unknown_chars:
         uuid_lower = uuid.lower()
@@ -4626,7 +4630,7 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
 
     # OUI Lookup Results
     oui = research.get("oui_lookup", {})
-    print(f"\n  \033[1;33m📍 DEVICE MANUFACTURER (OUI Lookup)\033[0m")
+    print("\n  \033[1;33m📍 DEVICE MANUFACTURER (OUI Lookup)\033[0m")
     if oui.get("vendor"):
         print(f"     MAC OUI: \033[1;36m{oui.get('oui')}\033[0m")
         print(f"     Vendor: \033[1;32m{oui.get('vendor')}\033[0m")
@@ -4636,12 +4640,12 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
     else:
         print(f"     MAC OUI: \033[1;36m{oui.get('oui')}\033[0m")
         print(
-            f"     \033[0;90mVendor not found in public databases (may be randomized MAC)\033[0m"
+            "     \033[0;90mVendor not found in public databases (may be randomized MAC)\033[0m"
         )
 
     # Pattern Analysis
     analysis = research.get("pattern_analysis", {})
-    print(f"\n  \033[1;33m🔍 UUID PATTERN ANALYSIS\033[0m")
+    print("\n  \033[1;33m🔍 UUID PATTERN ANALYSIS\033[0m")
 
     if analysis.get("uuid_versions"):
         versions = ", ".join(f"{k}: {v}" for k, v in analysis["uuid_versions"].items())
@@ -4657,21 +4661,21 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
         print(
             f"     Characteristics with this base: {analysis.get('common_base_count', 0)}"
         )
-        print(f"     \033[0;90m→ Search this pattern to identify the vendor SDK\033[0m")
+        print("     \033[0;90m→ Search this pattern to identify the vendor SDK\033[0m")
 
     if len(base_patterns) == 1:
         print(
-            f"     \033[1;32m✓ All UUIDs share the same base - likely from a single vendor SDK\033[0m"
+            "     \033[1;32m✓ All UUIDs share the same base - likely from a single vendor SDK\033[0m"
         )
     elif len(base_patterns) > 1:
         print(
-            f"     \033[0;33m⚠ Multiple base patterns - device may use multiple vendor libraries\033[0m"
+            "     \033[0;33m⚠ Multiple base patterns - device may use multiple vendor libraries\033[0m"
         )
 
     # Nordic Database Results
     nordic = research.get("nordic_results", {})
     if nordic:
-        print(f"\n  \033[1;33m📚 NORDIC DATABASE MATCHES\033[0m")
+        print("\n  \033[1;33m📚 NORDIC DATABASE MATCHES\033[0m")
         for uuid, info in nordic.items():
             print(f"     \033[1;32m{info.get('name', 'Unknown')}\033[0m")
             print(f"       UUID: {uuid}")
@@ -4680,7 +4684,7 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
     # Known BLE Specifications Results
     known_specs = research.get("known_specs", {})
     if known_specs:
-        print(f"\n  \033[1;33m📖 KNOWN BLE SPECIFICATIONS\033[0m")
+        print("\n  \033[1;33m📖 KNOWN BLE SPECIFICATIONS\033[0m")
         for uuid, info in known_specs.items():
             print(f"     \033[1;32m✓ {info.get('name', 'Unknown')}\033[0m")
             print(f"       UUID: \033[1;36m{uuid}\033[0m")
@@ -4696,7 +4700,7 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
     # Web Search Results
     web_results = research.get("web_results", {})
     if web_results:
-        print(f"\n  \033[1;33m🌐 WEB SEARCH RESULTS\033[0m")
+        print("\n  \033[1;33m🌐 WEB SEARCH RESULTS\033[0m")
         for uuid, info in web_results.items():
             if info.get("web_results"):
                 print(f"     UUID: \033[1;36m{uuid}\033[0m")
@@ -4716,20 +4720,20 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
     # GitHub Results
     github = research.get("github_results", {})
     if github:
-        print(f"\n  \033[1;33m🔗 GITHUB CODE REFERENCES\033[0m")
+        print("\n  \033[1;33m🔗 GITHUB CODE REFERENCES\033[0m")
         for uuid, results in github.items():
             print(f"     UUID: {uuid[:8]}...{uuid[-4:]}")
             for r in results[:2]:
                 print(f"       → \033[0;36m{r.get('repo')}\033[0m")
                 print(f"         {r.get('path')}")
     else:
-        print(f"\n  \033[1;33m🔗 GITHUB CODE REFERENCES\033[0m")
+        print("\n  \033[1;33m🔗 GITHUB CODE REFERENCES\033[0m")
         print(
-            f"     \033[0;90mNo public code references found (may need authenticated search)\033[0m"
+            "     \033[0;90mNo public code references found (may need authenticated search)\033[0m"
         )
 
     # Recommended next steps
-    print(f"\n  \033[1;33m📋 RECOMMENDED NEXT STEPS\033[0m")
+    print("\n  \033[1;33m📋 RECOMMENDED NEXT STEPS\033[0m")
 
     vendor = oui.get("vendor") or analysis.get("likely_vendor")
     if vendor:
@@ -4739,7 +4743,7 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
         print(f"     2. Look for {vendor} developer portal or GitHub repositories")
     else:
         print(
-            f"     1. Device may use a randomized MAC - check Device Information Service for vendor"
+            "     1. Device may use a randomized MAC - check Device Information Service for vendor"
         )
 
     # Count how many UUIDs were identified
@@ -4772,7 +4776,7 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
     # FCC lookup suggestion if we found a vendor
     if vendor:
         vendor_search = vendor.replace(" ", "+").replace(",", "")
-        print(f"\n     \033[0;90mFCC Database (may have protocol details):\033[0m")
+        print("\n     \033[0;90mFCC Database (may have protocol details):\033[0m")
         print(f"       https://fccid.io/search?q={vendor_search}")
 
 
@@ -4808,7 +4812,7 @@ def format_characteristic_value(
         # Appearance (2 bytes)
         if short_id and short_id.lower() == "2a01" and len(value) >= 2:
             appearance = struct.unpack("<H", value[:2])[0]
-            appearance_name = appearances.get(appearance, f"Unknown")
+            appearance_name = appearances.get(appearance, "Unknown")
             return f"{appearance_name} (0x{appearance:04X})"
 
         # Battery Level (1 byte, 0-100%)
@@ -5118,7 +5122,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         "2b9c": ("Current Track Segments ObjID", "Track segments object ID"),
         "2b9d": ("Current Track ObjID", "Current track object ID"),
         "2b9e": ("Next Track ObjID", "Next track object ID"),
-        "2b9f": ("Parent Group ObjID", "Parent group object ID"),
+        "2b9": ("Parent Group ObjID", "Parent group object ID"),
         "2ba0": ("Current Group ObjID", "Current group object ID"),
         "2ba1": ("Playing Order", "Order of playback (shuffle, repeat, etc)"),
         "2ba2": ("Playing Orders Supported", "Supported playback orders"),
@@ -5155,7 +5159,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         # Volume Control Service (0x1844)
         "2b7d": ("Volume State", "Current volume level and mute state"),
         "2b7e": ("Volume Control Point", "Volume commands"),
-        "2b7f": ("Volume Flags", "Volume feature flags"),
+        "2b7": ("Volume Flags", "Volume feature flags"),
         # Microphone Control Service (0x184D)
         "2bc3": ("Mute", "Microphone mute state"),
         # Audio Input Control Service (0x1843)
@@ -5177,7 +5181,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         "2a4e": ("Protocol Mode", "HID boot/report protocol mode"),
         # Environmental Sensing (0x181A)
         "2a6e": ("Temperature", "Temperature measurement"),
-        "2a6f": ("Humidity", "Humidity percentage"),
+        "2a6": ("Humidity", "Humidity percentage"),
         "2a76": ("UV Index", "UV radiation index"),
         "2a77": ("Irradiance", "Light irradiance value"),
         "2a78": ("Rainfall", "Rainfall measurement"),
@@ -5186,7 +5190,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         "2aa2": ("Magnetic Flux Density 3D", "3D compass data"),
         # Current Time Service (0x1805)
         "2a2b": ("Current Time", "Current date/time"),
-        "2a0f": ("Local Time Information", "Timezone and DST info"),
+        "2a0": ("Local Time Information", "Timezone and DST info"),
         "2a14": ("Reference Time Information", "Time accuracy info"),
         # Location and Navigation (0x1819)
         "2a67": ("Location and Speed", "GPS location and speed"),
@@ -5194,7 +5198,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         "2a6a": ("LN Feature", "Location/Navigation features"),
         "2a6b": ("LN Control Point", "Location/Navigation control"),
         # Scan Parameters (0x1813)
-        "2a4f": ("Scan Interval Window", "BLE scan parameters"),
+        "2a4": ("Scan Interval Window", "BLE scan parameters"),
         "2a31": ("Scan Refresh", "Scan refresh value"),
         # Alert Notification Service (0x1811)
         "2a44": ("Alert Notification Control Point", "Alert control"),
@@ -5203,7 +5207,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         "2a48": ("Supported Unread Alert Category", "Unread categories supported"),
         "2a45": ("Unread Alert Status", "Unread alert count"),
         # Phone Alert Status (0x180E)
-        "2a3f": ("Alert Status", "Phone alert status (silent, vibrate, etc)"),
+        "2a3": ("Alert Status", "Phone alert status (silent, vibrate, etc)"),
         "2a40": ("Ringer Control Point", "Control phone ringer"),
         "2a41": ("Ringer Setting", "Current ringer setting"),
         # Immediate Alert (0x1802)
@@ -5450,10 +5454,10 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
             print(f"{' ' * indent}\033[1;33m{label}:\033[0m {value}")
 
     print(f"\n\033[1;36m{'═' * term_width}\033[0m")
-    print(f"\033[1;36m  BLE DEVICE ENUMERATION\033[0m")
+    print("\033[1;36m  BLE DEVICE ENUMERATION\033[0m")
     print(f"\033[1;36m{'═' * term_width}\033[0m")
     print(f"\n  Target: \033[1;32m{target_address}\033[0m")
-    print(f"  Connecting...\n")
+    print("  Connecting...\n")
 
     device = None
     connection = None
@@ -5542,7 +5546,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
 
                     if should_retry and attempt < max_retries:
                         print(
-                            f"  \033[0;90m(This error is often transient, retrying...)\033[0m"
+                            "  \033[0;90m(This error is often transient, retrying...)\033[0m"
                         )
                         await asyncio.sleep(1.0)
                         continue
@@ -5551,13 +5555,13 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                         break  # Try next address type
                     continue
 
-                print(f"  \033[1;32mConnected!\033[0m")
+                print("  \033[1;32mConnected!\033[0m")
                 print(f"  Connection Handle: 0x{connection.handle:04X}")
 
                 # Create peer for GATT operations
                 peer = Peer(connection)
 
-                print(f"\n  \033[1;33mDiscovering GATT services...\033[0m")
+                print("\n  \033[1;33mDiscovering GATT services...\033[0m")
                 try:
                     await asyncio.wait_for(peer.discover_services(), timeout=15.0)
                     await asyncio.wait_for(
@@ -5566,7 +5570,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                     # Success - break out of both loops
                     break
                 except asyncio.TimeoutError:
-                    print(f"  \033[1;31mService discovery timed out\033[0m")
+                    print("  \033[1;31mService discovery timed out\033[0m")
                     try:
                         await connection.disconnect()
                     except Exception:
@@ -5599,19 +5603,19 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                 break
 
         if not peer or not connection:
-            print(f"  \033[1;31mFailed to connect with any address type\033[0m")
-            print(f"\n  \033[1;33mPossible reasons:\033[0m")
-            print(f"    • Device may have changed its MAC address (BLE privacy/RPA)")
-            print(f"    • Device may be out of range or powered off")
-            print(f"    • Device may be connected to another host")
-            print(f"    • Device may require the screen to be unlocked")
-            print(f"\n  \033[1;33mSuggestions:\033[0m")
+            print("  \033[1;31mFailed to connect with any address type\033[0m")
+            print("\n  \033[1;33mPossible reasons:\033[0m")
+            print("    • Device may have changed its MAC address (BLE privacy/RPA)")
+            print("    • Device may be out of range or powered off")
+            print("    • Device may be connected to another host")
+            print("    • Device may require the screen to be unlocked")
+            print("\n  \033[1;33mSuggestions:\033[0m")
             print(
-                f"    • Run '\033[1;36mble-scan\033[0m' again to find the current address"
+                "    • Run '\033[1;36mble-scan\033[0m' again to find the current address"
             )
-            print(f"    • Make sure the device is discoverable (BT settings open)")
-            print(f"    • Try moving closer to the device")
-            print(f"    • Disconnect the device from other paired hosts")
+            print("    • Make sure the device is discoverable (BT settings open)")
+            print("    • Try moving closer to the device")
+            print("    • Disconnect the device from other paired hosts")
             return
 
         # Collect device info
@@ -5971,7 +5975,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
 
         # Print Services FIRST
         print_header(f"GATT SERVICES ({len(services_found)} found)")
-        print(f"  \033[1;33m📖 Reading all readable characteristics...\033[0m\n")
+        print("  \033[1;33m📖 Reading all readable characteristics...\033[0m\n")
 
         # Track unknown characteristics for research guidance
         unknown_characteristics = []
@@ -6072,7 +6076,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                     print(
                         f"       • \033[0;37m{display_char_uuid}\033[0m: [{', '.join(props)}]"
                     )
-                    print(f"         \033[0;90m⚠ Unknown vendor characteristic\033[0m")
+                    print("         \033[0;90m⚠ Unknown vendor characteristic\033[0m")
                     unknown_characteristics.append((char_uuid, props, service_name))
 
                 # Read and display value if --read-all is specified and characteristic is readable
@@ -6100,7 +6104,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                                 )
                             )
                     except asyncio.TimeoutError:
-                        print(f"         \033[0;90m→ Read timeout\033[0m")
+                        print("         \033[0;90m→ Read timeout\033[0m")
                     except Exception as e:
                         err_str = str(e)
                         if (
@@ -6108,15 +6112,15 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                             or "AUTHENTICATION" in err_str
                         ):
                             print(
-                                f"         \033[0;33m→ Requires authentication/pairing\033[0m"
+                                "         \033[0;33m→ Requires authentication/pairing\033[0m"
                             )
                         elif (
                             "INSUFFICIENT_ENCRYPTION" in err_str
                             or "ENCRYPTION" in err_str
                         ):
-                            print(f"         \033[0;33m→ Requires encryption\033[0m")
+                            print("         \033[0;33m→ Requires encryption\033[0m")
                         elif "READ_NOT_PERMITTED" in err_str:
-                            print(f"         \033[0;90m→ Read not permitted\033[0m")
+                            print("         \033[0;90m→ Read not permitted\033[0m")
                         else:
                             logging.debug(f"Read failed for {char_uuid}: {e}")
                             print(
@@ -6143,16 +6147,14 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                 print_research_results(research, unknown_characteristics, term_width)
             except Exception as e:
                 logging.debug(f"Research failed: {e}")
-                print(
-                    f"  \033[0;33m⚠ Automated research failed (network issue?)\033[0m"
-                )
-                print(f"  \033[0;90mManual research URLs:\033[0m")
+                print("  \033[0;33m⚠ Automated research failed (network issue?)\033[0m")
+                print("  \033[0;90mManual research URLs:\033[0m")
                 mac_parts = target_address.replace("/P", "").split(":")
                 if len(mac_parts) >= 3:
                     oui = "".join(mac_parts[:3]).upper()
                     print(f"    → https://maclookup.app/search/result?mac={oui}")
                 print(
-                    f"    → https://github.com/NordicSemiconductor/bluetooth-numbers-database"
+                    "    → https://github.com/NordicSemiconductor/bluetooth-numbers-database"
                 )
                 for uuid, _, _ in unknown_characteristics[:3]:
                     print(f'    → Google: "{uuid}"')
@@ -6193,7 +6195,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
             "fe33",
             "fe65",
             "fd5a",
-            "fd6f",
+            "fd6",
         ]
         for svc_uuid, svc_name, svc_icon, svc in services_found:
             # Check short UUID format
@@ -6213,30 +6215,30 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
 
         if tracker_services_found:
             print(
-                f"\n  \033[1;31m╔══════════════════════════════════════════════════════════════╗\033[0m"
+                "\n  \033[1;31m╔══════════════════════════════════════════════════════════════╗\033[0m"
             )
             print(
-                f"  \033[1;31m║  ⚠️  POTENTIAL TRACKING DEVICE DETECTED                       ║\033[0m"
+                "  \033[1;31m║  ⚠️  POTENTIAL TRACKING DEVICE DETECTED                       ║\033[0m"
             )
             print(
-                f"  \033[1;31m╚══════════════════════════════════════════════════════════════╝\033[0m"
+                "  \033[1;31m╚══════════════════════════════════════════════════════════════╝\033[0m"
             )
             for tracker_uuid, tracker_name in tracker_services_found:
                 print(
                     f"    \033[1;31m• {tracker_name} (0x{tracker_uuid.upper()})\033[0m"
                 )
             print(
-                f"    \033[0;33mThis device may be a location tracker (AirTag, Tile, etc.)\033[0m"
+                "    \033[0;33mThis device may be a location tracker (AirTag, Tile, etc.)\033[0m"
             )
             print(
-                f"    \033[0;33mIf unexpected, check for unwanted tracking: https://support.apple.com/HT212227\033[0m"
+                "    \033[0;33mIf unexpected, check for unwanted tracking: https://support.apple.com/HT212227\033[0m"
             )
 
         # ═══════════════════════════════════════════════════════════════════
         # BASIC DEVICE IDENTITY
         # ═══════════════════════════════════════════════════════════════════
         print(
-            f"\n  \033[1;35m┌─ DEVICE IDENTITY ─────────────────────────────────────────┐\033[0m"
+            "\n  \033[1;35m┌─ DEVICE IDENTITY ─────────────────────────────────────────┐\033[0m"
         )
         print_field("Address", target_address, indent=4)
         print_field("Device Type", ", ".join(set(device_types)), indent=4)
@@ -6303,7 +6305,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         battery_level = read_values_by_id.get("2a19")
         if battery_level or device_info.get("battery") is not None:
             print(
-                f"\n  \033[1;35m┌─ BATTERY STATUS ──────────────────────────────────────────┐\033[0m"
+                "\n  \033[1;35m┌─ BATTERY STATUS ──────────────────────────────────────────┐\033[0m"
             )
             if battery_level:
                 level_str = battery_level[1]
@@ -6356,7 +6358,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
 
         if has_telephony:
             print(
-                f"\n  \033[1;35m┌─ TELEPHONY (Phone/Carrier) ───────────────────────────────┐\033[0m"
+                "\n  \033[1;35m┌─ TELEPHONY (Phone/Carrier) ───────────────────────────────┐\033[0m"
             )
 
             # Bearer Provider Name (carrier)
@@ -6417,7 +6419,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
 
         if has_media:
             print(
-                f"\n  \033[1;35m┌─ MEDIA PLAYBACK ──────────────────────────────────────────┐\033[0m"
+                "\n  \033[1;35m┌─ MEDIA PLAYBACK ──────────────────────────────────────────┐\033[0m"
             )
 
             # Media Player Name
@@ -6462,7 +6464,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
 
         if has_audio:
             print(
-                f"\n  \033[1;35m┌─ AUDIO CAPABILITIES ──────────────────────────────────────┐\033[0m"
+                "\n  \033[1;35m┌─ AUDIO CAPABILITIES ──────────────────────────────────────┐\033[0m"
             )
 
             # TMAP Role
@@ -6537,7 +6539,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
 
         if other_values:
             print(
-                f"\n  \033[1;35m┌─ ADDITIONAL CHARACTERISTICS ──────────────────────────────┐\033[0m"
+                "\n  \033[1;35m┌─ ADDITIONAL CHARACTERISTICS ──────────────────────────────┐\033[0m"
             )
             for service_name, values in other_values.items():
                 print(f"    \033[1;32m{service_name}\033[0m")
@@ -6548,7 +6550,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         # ENUMERATION STATISTICS
         # ═══════════════════════════════════════════════════════════════════
         print(
-            f"\n  \033[1;35m┌─ ENUMERATION STATISTICS ──────────────────────────────────┐\033[0m"
+            "\n  \033[1;35m┌─ ENUMERATION STATISTICS ──────────────────────────────────┐\033[0m"
         )
         print_field("Total Services", len(services_found), indent=4)
         print_field("Characteristics Read", len(all_read_values), indent=4)
@@ -6562,9 +6564,9 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         print(f"\n\033[1;36m{'═' * term_width}\033[0m\n")
 
     except KeyboardInterrupt:
-        print(f"\n  \033[1;33mCleaning up...\033[0m")
+        print("\n  \033[1;33mCleaning up...\033[0m")
     except asyncio.CancelledError:
-        print(f"\n  \033[1;33mOperation cancelled. Cleaning up...\033[0m")
+        print("\n  \033[1;33mOperation cancelled. Cleaning up...\033[0m")
     except Exception as e:
         logging.error("Enumeration failed: %s", e)
         import traceback
@@ -6693,7 +6695,7 @@ async def command_ble_speaker(args: argparse.Namespace):
     term_width = os.get_terminal_size().columns
 
     print(f"\n\033[1;36m{'═' * term_width}\033[0m")
-    print(f"\033[1;36m  BLE SPEAKER CONTROL PoC\033[0m")
+    print("\033[1;36m  BLE SPEAKER CONTROL PoC\033[0m")
     print(f"\033[1;36m{'═' * term_width}\033[0m\n")
     print(f"  Target: {target_address}")
     print(f"  Action: {action}")
@@ -6758,21 +6760,21 @@ async def command_ble_speaker(args: argparse.Namespace):
                 continue
 
         if connection is None:
-            print(f"  \033[1;31mFailed to connect with any address type\033[0m")
-            print(f"\n  \033[1;33mPossible reasons:\033[0m")
-            print(f"    • Device may have changed its MAC address (BLE privacy/RPA)")
-            print(f"    • Device may be out of range or powered off")
-            print(f"    • Device may be connected to another host")
-            print(f"\n  \033[1;33mSuggestions:\033[0m")
+            print("  \033[1;31mFailed to connect with any address type\033[0m")
+            print("\n  \033[1;33mPossible reasons:\033[0m")
+            print("    • Device may have changed its MAC address (BLE privacy/RPA)")
+            print("    • Device may be out of range or powered off")
+            print("    • Device may be connected to another host")
+            print("\n  \033[1;33mSuggestions:\033[0m")
             print(
-                f"    • Run '\033[1;36mble-scan\033[0m' again to find the current address"
+                "    • Run '\033[1;36mble-scan\033[0m' again to find the current address"
             )
-            print(f"    • Make sure the device is in pairing/discoverable mode")
-            print(f"    • Try moving closer to the device")
+            print("    • Make sure the device is in pairing/discoverable mode")
+            print("    • Try moving closer to the device")
             return
 
         # Discover services
-        print(f"  Discovering GATT services...")
+        print("  Discovering GATT services...")
         peer = Peer(connection)
         await peer.discover_services()
         await peer.discover_characteristics()
@@ -6824,7 +6826,7 @@ async def command_ble_speaker(args: argparse.Namespace):
             print_header("SPEAKER CONTROL ANALYSIS")
 
             print(
-                f"\n  \033[1;33m🔍 Writable Characteristics (potential controls):\033[0m\n"
+                "\n  \033[1;33m🔍 Writable Characteristics (potential controls):\033[0m\n"
             )
 
             for svc_uuid, char, write_type in writable_chars:
@@ -6845,16 +6847,16 @@ async def command_ble_speaker(args: argparse.Namespace):
                 print(f"      Purpose: {purpose}")
                 print()
 
-            print(f"  \033[1;33m📋 Suggested Commands:\033[0m\n")
-            print(f"    Try reading all characteristics to understand the device:")
+            print("  \033[1;33m📋 Suggested Commands:\033[0m\n")
+            print("    Try reading all characteristics to understand the device:")
             print(
                 f"    \033[0;36m  python race_toolkit.py -c {controller} --target-address {target_address} ble-speaker --action read-all\033[0m\n"
             )
-            print(f"    Try writing test patterns to find control characteristics:")
+            print("    Try writing test patterns to find control characteristics:")
             print(
                 f"    \033[0;36m  python race_toolkit.py -c {controller} --target-address {target_address} ble-speaker --action write-test\033[0m\n"
             )
-            print(f"    Try specific media control:")
+            print("    Try specific media control:")
             print(
                 f"    \033[0;36m  python race_toolkit.py -c {controller} --target-address {target_address} ble-speaker --action play\033[0m\n"
             )
@@ -6897,7 +6899,7 @@ async def command_ble_speaker(args: argparse.Namespace):
         elif action == "write-test":
             # Probe writable characteristics with test patterns
             print_header("PROBING WRITABLE CHARACTERISTICS")
-            print(f"\n  \033[0;33m⚠ This will write test data to the device!\033[0m\n")
+            print("\n  \033[0;33m⚠ This will write test data to the device!\033[0m\n")
 
             for svc_uuid, char, write_type in writable_chars:
                 char_uuid_str = str(char.uuid).lower()
@@ -6965,12 +6967,12 @@ async def command_ble_speaker(args: argparse.Namespace):
                         # Try flipping first byte
                         modified = bytearray(current_value)
                         modified[0] = 0x01 if modified[0] == 0x00 else 0x00
-                        test_patterns.append((bytes(modified), f"Toggle first byte"))
+                        test_patterns.append((bytes(modified), "Toggle first byte"))
 
                         # Try flipping last byte
                         modified = bytearray(current_value)
                         modified[-1] = 0x01 if modified[-1] == 0x00 else 0x00
-                        test_patterns.append((bytes(modified), f"Toggle last byte"))
+                        test_patterns.append((bytes(modified), "Toggle last byte"))
 
                         # Try all zeros of same length
                         test_patterns.append(
@@ -7090,10 +7092,10 @@ async def command_ble_speaker(args: argparse.Namespace):
 
             if success_count > 0:
                 print(f"\n  \033[1;32m✓ {success_count} write(s) succeeded!\033[0m")
-                print(f"    Check if the speaker responded to any command.")
+                print("    Check if the speaker responded to any command.")
             else:
                 print(
-                    f"\n  \033[0;33m⚠ No writes succeeded. Device may require authentication.\033[0m"
+                    "\n  \033[0;33m⚠ No writes succeeded. Device may require authentication.\033[0m"
                 )
 
         elif action in ["play", "pause", "next", "prev", "vol-up", "vol-down", "mute"]:
@@ -7161,7 +7163,6 @@ async def command_avrcp(args: argparse.Namespace):
     from bumble.hci import Address
     from bumble.core import BT_BR_EDR_TRANSPORT
     from bumble import avrcp, avc
-    from bumble.avrcp import StatusCode
 
     controller = args.controller or "usb:0"
     target_address = args.target_address
@@ -7193,11 +7194,11 @@ async def command_avrcp(args: argparse.Namespace):
     }
 
     print(f"\n\033[1;36m{'═' * term_width}\033[0m")
-    print(f"\033[1;36m  AVRCP MEDIA CONTROL - NO AUTHENTICATION\033[0m")
+    print("\033[1;36m  AVRCP MEDIA CONTROL - NO AUTHENTICATION\033[0m")
     print(f"\033[1;36m{'═' * term_width}\033[0m\n")
     print(f"  Target: {target_address}")
     print(f"  Action: {action}")
-    print(f"  Auth: \033[1;31mDISABLED (CVE-2025-20701 exploit)\033[0m")
+    print("  Auth: \033[1;31mDISABLED (CVE-2025-20701 exploit)\033[0m")
     if action != "info":
         print(f"  Repeat: {repeat_count}x")
         print(f"  Hold Time: {hold_time}s")
@@ -7224,7 +7225,7 @@ async def command_avrcp(args: argparse.Namespace):
                 timeout=timeout,
             )
             connected = True
-            print(f"  \033[1;32m✓ Connected WITHOUT authentication!\033[0m")
+            print("  \033[1;32m✓ Connected WITHOUT authentication!\033[0m")
             print(f"    Handle: 0x{checker.connection.handle:04X}")
             break
 
@@ -7245,21 +7246,21 @@ async def command_avrcp(args: argparse.Namespace):
                     continue
                 else:
                     print(
-                        f"\n  \033[1;31m✗ Device not responding to Classic Bluetooth\033[0m"
+                        "\n  \033[1;31m✗ Device not responding to Classic Bluetooth\033[0m"
                     )
-                    print(f"\n  Possible causes:")
-                    print(f"    • Device is connected to another phone/computer")
-                    print(f"    • Device is in BLE-only mode")
-                    print(f"    • Device is out of range or powered off")
-                    print(f"\n  Try:")
-                    print(f"    • Disconnect the device from your phone first")
-                    print(f"    • Put device in pairing mode")
-                    print(f"    • Move closer to the device")
+                    print("\n  Possible causes:")
+                    print("    • Device is connected to another phone/computer")
+                    print("    • Device is in BLE-only mode")
+                    print("    • Device is out of range or powered off")
+                    print("\n  Try:")
+                    print("    • Disconnect the device from your phone first")
+                    print("    • Put device in pairing mode")
+                    print("    • Move closer to the device")
                     await checker.close()
                     return
 
             elif "limited_resources" in error_str:
-                print(f"  \033[0;33m⚠ Controller busy, resetting...\033[0m")
+                print("  \033[0;33m⚠ Controller busy, resetting...\033[0m")
                 await checker.close()
                 release_bluetooth_controller(controller)
                 await asyncio.sleep(2.0)
@@ -7286,7 +7287,7 @@ async def command_avrcp(args: argparse.Namespace):
 
     try:
         # Connect AVRCP protocol directly - NO AUTHENTICATION
-        print(f"\n  \033[1;33mConnecting AVRCP (no authentication)...\033[0m")
+        print("\n  \033[1;33mConnecting AVRCP (no authentication)...\033[0m")
 
         # Create a minimal delegate
         class MinimalDelegate(avrcp.Delegate):
@@ -7316,7 +7317,8 @@ async def command_avrcp(args: argparse.Namespace):
                 return []
 
             async def inform_battery_status_of_ct(self, battery_status):
-                return StatusCode.OPERATION_COMPLETED
+                # AVRCP StatusCode.OPERATION_COMPLETED
+                return 0x04
 
             async def set_absolute_volume(self, volume):
                 self.volume = volume
@@ -7333,14 +7335,14 @@ async def command_avrcp(args: argparse.Namespace):
             try:
                 avrcp_protocol = avrcp.Protocol(delegate)
                 await asyncio.wait_for(avrcp_protocol.connect(connection), timeout=10.0)
-                print(f"  \033[1;32m✓ AVRCP connected without authentication!\033[0m")
+                print("  \033[1;32m✓ AVRCP connected without authentication!\033[0m")
                 break
             except asyncio.CancelledError:
                 print(
                     f"\n  \033[0;33m⚠ AVRCP connection cancelled (attempt {avrcp_attempt + 1}/{avrcp_retries})\033[0m"
                 )
                 if avrcp_attempt < avrcp_retries - 1:
-                    print(f"    Connection may have dropped. Reconnecting...")
+                    print("    Connection may have dropped. Reconnecting...")
                     # Reconnect the underlying BR/EDR connection
                     try:
                         await checker.close()
@@ -7366,7 +7368,7 @@ async def command_avrcp(args: argparse.Namespace):
                         if checker.connection is None:
                             raise RuntimeError("No connection established")
                         connection = checker.connection
-                        print(f"    \033[1;32m✓ Reconnected!\033[0m")
+                        print("    \033[1;32m✓ Reconnected!\033[0m")
                     except Exception as reconn_err:
                         print(
                             f"    \033[0;31m✗ Reconnection failed: {reconn_err}\033[0m"
@@ -7376,10 +7378,8 @@ async def command_avrcp(args: argparse.Namespace):
                     print(
                         f"\n  \033[1;31m✗ AVRCP connection failed after {avrcp_retries} attempts.\033[0m"
                     )
-                    print(f"    The device may be rejecting the AVRCP connection.")
-                    print(
-                        f"    Try disconnecting the speaker from other devices first."
-                    )
+                    print("    The device may be rejecting the AVRCP connection.")
+                    print("    Try disconnecting the speaker from other devices first.")
                     return
             except Exception as e:
                 error_str = str(e).lower()
@@ -7391,27 +7391,27 @@ async def command_avrcp(args: argparse.Namespace):
                         await asyncio.sleep(1.0)
                         continue
                 print(f"\n  \033[1;31m✗ AVRCP connection failed: {e}\033[0m")
-                print(f"  Device may require authentication for AVRCP.")
+                print("  Device may require authentication for AVRCP.")
                 return
 
         if avrcp_protocol is None:
-            print(f"\n  \033[1;31m✗ Failed to establish AVRCP connection.\033[0m")
+            print("\n  \033[1;31m✗ Failed to establish AVRCP connection.\033[0m")
             return
 
         await asyncio.sleep(0.3)
 
         if action == "info":
             print(f"\n\033[1;36m{'─' * term_width}\033[0m")
-            print(f"\033[1;36m  DEVICE INFO (unauthenticated)\033[0m")
+            print("\033[1;36m  DEVICE INFO (unauthenticated)\033[0m")
             print(f"\033[1;36m{'─' * term_width}\033[0m\n")
 
             # Get supported events
             try:
-                print(f"  Querying capabilities...")
+                print("  Querying capabilities...")
                 events = await asyncio.wait_for(
                     avrcp_protocol.get_supported_events(), timeout=5.0
                 )
-                print(f"  \033[1;32mSupported Events:\033[0m")
+                print("  \033[1;32mSupported Events:\033[0m")
                 for event in events:
                     print(f"    • {event.name}")
             except Exception as e:
@@ -7419,11 +7419,11 @@ async def command_avrcp(args: argparse.Namespace):
 
             # Get play status
             try:
-                print(f"\n  Querying play status...")
+                print("\n  Querying play status...")
                 status = await asyncio.wait_for(
                     avrcp_protocol.get_play_status(), timeout=5.0
                 )
-                print(f"  \033[1;32mPlay Status:\033[0m")
+                print("  \033[1;32mPlay Status:\033[0m")
                 print(
                     f"    • Status: {status.play_status.name if status.play_status else 'Unknown'}"
                 )
@@ -7438,7 +7438,7 @@ async def command_avrcp(args: argparse.Namespace):
 
             # Get track info
             try:
-                print(f"\n  Querying track info...")
+                print("\n  Querying track info...")
                 attributes = await asyncio.wait_for(
                     avrcp_protocol.get_element_attributes(
                         0,
@@ -7451,20 +7451,20 @@ async def command_avrcp(args: argparse.Namespace):
                     timeout=5.0,
                 )
                 if attributes:
-                    print(f"  \033[1;32mTrack Info:\033[0m")
+                    print("  \033[1;32mTrack Info:\033[0m")
                     for attr in attributes:
                         print(f"    • {attr.attribute_id.name}: {attr.attribute_value}")
             except Exception as e:
                 print(f"  \033[0;33m⚠ Could not get track info: {e}\033[0m")
 
             print(
-                f"\n  \033[1;32m✓ Successfully accessed device WITHOUT authentication!\033[0m"
+                "\n  \033[1;32m✓ Successfully accessed device WITHOUT authentication!\033[0m"
             )
-            print(f"\n  Control commands:")
-            print(f"    \033[0;36m... avrcp --action play\033[0m")
-            print(f"    \033[0;36m... avrcp --action pause\033[0m")
-            print(f"    \033[0;36m... avrcp --action next\033[0m")
-            print(f"    \033[0;36m... avrcp --action vol-up --repeat 5\033[0m")
+            print("\n  Control commands:")
+            print("    \033[0;36m... avrcp --action play\033[0m")
+            print("    \033[0;36m... avrcp --action pause\033[0m")
+            print("    \033[0;36m... avrcp --action next\033[0m")
+            print("    \033[0;36m... avrcp --action vol-up --repeat 5\033[0m")
 
         else:
             # Send media control command
@@ -7481,21 +7481,21 @@ async def command_avrcp(args: argparse.Namespace):
                 if repeat_count > 1:
                     print(f"  [{i + 1}/{repeat_count}] ", end="")
                 else:
-                    print(f"  ", end="")
+                    print("  ", end="")
 
                 try:
                     print(f"Sending {action}... ", end="", flush=True)
                     await avrcp_protocol.send_key_event(operation, True)
                     await asyncio.sleep(hold_time)
                     await avrcp_protocol.send_key_event(operation, False)
-                    print(f"\033[1;32m✓ Success!\033[0m")
+                    print("\033[1;32m✓ Success!\033[0m")
 
                     if i < repeat_count - 1:
                         await asyncio.sleep(0.2)
                 except Exception as e:
                     print(f"\033[0;31m✗ Failed: {e}\033[0m")
 
-            print(f"\n  \033[1;32m✓ Command sent without authentication!\033[0m")
+            print("\n  \033[1;32m✓ Command sent without authentication!\033[0m")
 
         print(f"\n\033[1;36m{'═' * term_width}\033[0m\n")
 
@@ -7746,6 +7746,7 @@ async def command_hfp_demo(args: argparse.Namespace):
     from bumble.rfcomm import Client as RFCOMM_Client
     from bumble.core import BT_BR_EDR_TRANSPORT
     from bumble import hfp
+    from bumble.device import Device
     from bumble.hci import (
         HCI_Enhanced_Setup_Synchronous_Connection_Command,
         HCI_SynchronousDataPacket,
@@ -8359,6 +8360,7 @@ async def command_hfp_demo(args: argparse.Namespace):
                         device = checker.device
                         if device is None:
                             raise RuntimeError("Bluetooth device not initialized")
+                        device = cast(Device, device)
                         device.on("sco_connection", on_sco_connection)
                         device.on("sco_connection_failure", on_sco_failure)
 
