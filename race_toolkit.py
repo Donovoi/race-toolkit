@@ -9,6 +9,7 @@ from affected devices.
 
 import argparse
 import asyncio
+import bumble
 import fcntl
 import glob
 import logging
@@ -212,23 +213,18 @@ def release_bluetooth_controller(controller: str):
 
     logging.info("Releasing Bluetooth controller from system services...")
 
+    _check_realtek_firmware(controller)
+    _register_bluetooth_restore()
+
     # List of services/processes that commonly hold the Bluetooth controller
-    services_to_stop = ["bluetooth", "bluetooth.service"]
+    services_to_stop = ["bluetooth.service", "bluetooth"]
     processes_to_kill = ["bluetoothd", "bt_stack", "bluetoothctl"]
 
-    # Try to stop systemd services
+    # Stop systemd services that are currently active so we can restart them later.
     for service in services_to_stop:
-        try:
-            result = subprocess.run(
-                ["sudo", "systemctl", "stop", service],
-                capture_output=True,
-                timeout=5,
-                check=False,
-            )
-            if result.returncode == 0:
-                logging.debug("Stopped service: %s", service)
-        except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
-            pass
+        if _systemctl_is_active(service):
+            _bluetooth_services_to_restore.add(service)
+            _systemctl_action("stop", service)
 
     # Kill any remaining Bluetooth processes
     for proc_name in processes_to_kill:
@@ -245,6 +241,142 @@ def release_bluetooth_controller(controller: str):
     # Give the system a moment to release the device
     time.sleep(0.5)
     logging.debug("Bluetooth controller %s should now be available", controller)
+
+
+_bluetooth_services_to_restore: set[str] = set()
+_bluetooth_restore_registered = False
+
+
+def _systemctl_is_active(service: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", service],
+            capture_output=True,
+            timeout=3,
+            check=False,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
+        return False
+
+
+def _systemctl_action(action: str, service: str) -> None:
+    try:
+        result = subprocess.run(
+            ["sudo", "systemctl", action, service],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            if stderr:
+                logging.debug("systemctl %s %s failed: %s", action, service, stderr)
+    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as exc:
+        logging.debug("systemctl %s %s failed: %s", action, service, exc)
+
+
+def _restore_bluetooth_services() -> None:
+    if not _bluetooth_services_to_restore:
+        return
+    logging.info("Restoring Bluetooth services...")
+    for service in sorted(_bluetooth_services_to_restore):
+        _systemctl_action("start", service)
+    _bluetooth_services_to_restore.clear()
+
+
+def _register_bluetooth_restore() -> None:
+    global _bluetooth_restore_registered
+    if _bluetooth_restore_registered:
+        return
+    import atexit
+
+    atexit.register(_restore_bluetooth_services)
+    _bluetooth_restore_registered = True
+
+
+def _parse_usb_vid_pid(spec: str) -> tuple[int, int] | None:
+    parts = spec.split(":")
+    if len(parts) < 2:
+        return None
+    vid = parts[0]
+    pid = parts[1]
+    for separator in ("#", "/"):
+        if separator in pid:
+            pid = pid.split(separator, 1)[0]
+    if len(vid) != 4 or len(pid) != 4:
+        return None
+    try:
+        return int(vid, 16), int(pid, 16)
+    except ValueError:
+        return None
+
+
+def _get_usb_controller_vid_pid(controller: str) -> tuple[int, int] | None:
+    if not controller.startswith("usb:"):
+        return None
+    spec = controller[4:]
+    if spec.isdigit():
+        controllers = enumerate_bluetooth_controllers()
+        try:
+            idx = int(spec)
+        except ValueError:
+            return None
+        if idx < 0 or idx >= len(controllers):
+            return None
+        return _get_usb_controller_vid_pid(controllers[idx][0])
+    return _parse_usb_vid_pid(spec)
+
+
+def _is_realtek_usb_controller(vid_pid: tuple[int, int]) -> bool:
+    try:
+        from bumble.drivers import rtk
+    except ImportError:
+        return vid_pid[0] == 0x0BDA
+    return vid_pid in rtk.RTK_USB_PRODUCTS
+
+
+def _check_realtek_firmware(controller: str) -> None:
+    vid_pid = _get_usb_controller_vid_pid(controller)
+    if not vid_pid:
+        return
+    if not _is_realtek_usb_controller(vid_pid):
+        return
+
+    fw_dir = os.environ.get("BUMBLE_RTK_FIRMWARE_DIR")
+    if fw_dir:
+        if not os.path.isdir(fw_dir):
+            logging.error(
+                "BUMBLE_RTK_FIRMWARE_DIR is set to '%s' but the directory does not exist.",
+                fw_dir,
+            )
+            logging.error(
+                "Realtek controllers require firmware files here (rtl*_fw.bin). "
+                "Fix the path or unset BUMBLE_RTK_FIRMWARE_DIR to use system firmware."
+            )
+            raise RuntimeError("Realtek firmware directory not found")
+        if not glob.glob(os.path.join(fw_dir, "rtl*_fw.bin")):
+            logging.error(
+                "No Realtek firmware files (rtl*_fw.bin) found in '%s'.", fw_dir
+            )
+            logging.error(
+                "Copy the firmware files into that directory or unset "
+                "BUMBLE_RTK_FIRMWARE_DIR to use /lib/firmware/rtl_bt."
+            )
+            raise RuntimeError("Realtek firmware files missing")
+        return
+
+    system_fw_dir = "/lib/firmware/rtl_bt"
+    if not glob.glob(os.path.join(system_fw_dir, "rtl*_fw.bin")):
+        logging.error(
+            "Realtek controller detected, but no firmware files found in %s.",
+            system_fw_dir,
+        )
+        logging.error(
+            "Install the Realtek firmware (e.g., linux-firmware/firmware-realtek) "
+            "or set BUMBLE_RTK_FIRMWARE_DIR to a directory containing rtl*_fw.bin."
+        )
+        raise RuntimeError("Realtek firmware files missing")
 
 
 def reset_usb_bluetooth_controller(controller: str) -> bool:
@@ -2210,7 +2342,11 @@ async def command_ble_scan(args: argparse.Namespace):
         HCI_LE_Set_Scan_Parameters_Command,
         HCI_LE_Set_Scan_Enable_Command,
     )
-    from bumble.core import AdvertisingData, TimeoutError as BumbleTimeoutError, UUID as BumbleUUID
+    from bumble.core import (
+        AdvertisingData,
+        TimeoutError as BumbleTimeoutError,
+        UUID as BumbleUUID,
+    )
     import shutil
 
     controller = args.controller or "usb:0"
@@ -4273,11 +4409,12 @@ KNOWN_BLE_SPECIFICATIONS = {
 }
 
 
-async def search_web_for_uuid(uuid: str) -> dict:
+async def search_web_for_uuid(uuid: str, device_context: dict | None = None) -> dict:
     """Search the web for information about a UUID using DuckDuckGo.
 
     Args:
         uuid: The UUID to search for
+        device_context: Optional device metadata for relevance filtering
 
     Returns:
         Dictionary with search result or None
@@ -4327,6 +4464,64 @@ async def search_web_for_uuid(uuid: str) -> dict:
             titles = re.findall(title_pattern, html, re.IGNORECASE)
             snippets = re.findall(snippet_pattern, html, re.IGNORECASE)
 
+            def build_device_keywords(context: dict | None) -> set[str]:
+                if not context:
+                    return set()
+                keywords: set[str] = set()
+                stop_words = {
+                    "inc",
+                    "ltd",
+                    "corp",
+                    "co",
+                    "company",
+                    "corporation",
+                    "limited",
+                    "gmbh",
+                    "plc",
+                }
+                values = []
+                for key in ("name", "manufacturer", "model"):
+                    value = context.get(key)
+                    if value and str(value).strip() and value != "(unknown)":
+                        values.append(str(value))
+                for value in values:
+                    lower_value = value.lower()
+                    if len(lower_value) >= 3:
+                        keywords.add(lower_value)
+                    for token in re.split(r"[^a-z0-9]+", lower_value):
+                        if len(token) < 3:
+                            continue
+                        if token in stop_words:
+                            continue
+                        keywords.add(token)
+                return keywords
+
+            def is_ad_link(link: str) -> bool:
+                if not link:
+                    return False
+                lower_link = link.lower()
+                return (
+                    "duckduckgo.com/y.js" in lower_link
+                    or "ad_domain=" in lower_link
+                    or "ad_provider=" in lower_link
+                    or "ad_type=" in lower_link
+                    or "bing.com/aclick" in lower_link
+                )
+
+            def is_relevant_result(
+                title: str, snippet: str, link: str, context_keywords: set[str]
+            ) -> bool:
+                text = f"{title} {snippet} {link}".lower()
+                if uuid_lower in text:
+                    return True
+                if not context_keywords:
+                    return False
+                if not any(keyword in text for keyword in context_keywords):
+                    return False
+                return re.search(r"\b(bluetooth|ble|gatt|uuid)\b", text) is not None
+
+            context_keywords = build_device_keywords(device_context)
+
             for i, (result_url, title) in enumerate(titles[:3]):
                 # Decode DuckDuckGo redirect URL
                 if "uddg=" in result_url:
@@ -4350,15 +4545,19 @@ async def search_web_for_uuid(uuid: str) -> dict:
                     .replace("&gt;", ">")
                 )
 
-                # Skip if it's just a UUID listing without context
-                if title and uuid.lower() not in title.lower():
-                    results.append(
-                        {
-                            "title": title.strip(),
-                            "url": actual_url,
-                            "snippet": snippet.strip()[:200] if snippet else None,
-                        }
-                    )
+                if not title:
+                    continue
+                if is_ad_link(result_url) or is_ad_link(actual_url):
+                    continue
+                if not is_relevant_result(title, snippet, actual_url, context_keywords):
+                    continue
+                results.append(
+                    {
+                        "title": title.strip(),
+                        "url": actual_url,
+                        "snippet": snippet.strip()[:200] if snippet else None,
+                    }
+                )
 
             if results:
                 return {"web_results": results, "source": "DuckDuckGo Search"}
@@ -4526,13 +4725,14 @@ async def analyze_uuid_patterns(uuids: list) -> dict:
 
 
 async def research_unknown_characteristics(
-    unknown_chars: list, mac_address: str
+    unknown_chars: list, mac_address: str, device_context: dict | None = None
 ) -> dict:
     """Perform automated research on unknown characteristics.
 
     Args:
         unknown_chars: List of tuples (uuid, properties, service_name)
         mac_address: Device MAC address for OUI lookup
+        device_context: Optional device metadata for relevance filtering
 
     Returns:
         Dictionary with all research results
@@ -4595,7 +4795,7 @@ async def research_unknown_characteristics(
 
         # Limit web searches to avoid rate limits (first 10 unfound)
         if search_count < 10:
-            result = await search_web_for_uuid(uuid)
+            result = await search_web_for_uuid(uuid, device_context)
             if result:
                 if result.get("source") == "Known BLE Specifications":
                     research["known_specs"][uuid] = result
@@ -5446,6 +5646,81 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
         if value:
             print(f"{' ' * indent}\033[1;33m{label}:\033[0m {value}")
 
+    def collect_cve_findings(
+        services_found: list[tuple[str, str, str, Any]], device_address: str
+    ) -> list[dict]:
+        from librace.constants import UuidTable
+
+        race_profiles = [
+            {
+                "label": "Airoha RACE GATT",
+                "service_uuid": str(UuidTable.AIROHA_GATT_SERVICE_UUID).lower(),
+                "rx_uuid": str(UuidTable.AIROHA_GATT_RX_UUID).lower(),
+                "tx_uuid": str(UuidTable.AIROHA_GATT_TX_UUID).lower(),
+            },
+            {
+                "label": "Sony RACE GATT",
+                "service_uuid": str(UuidTable.SONY_GATT_SERVICE_UUID).lower(),
+                "rx_uuid": str(UuidTable.SONY_GATT_RX_UUID).lower(),
+                "tx_uuid": str(UuidTable.SONY_GATT_TX_UUID).lower(),
+            },
+        ]
+
+        service_uuids = {svc_uuid for svc_uuid, _name, _icon, _svc in services_found}
+        char_uuids: set[str] = set()
+        for _svc_uuid, _svc_name, _svc_icon, svc in services_found:
+            for char in svc.characteristics:
+                char_uuids.add(str(char.uuid).lower())
+
+        evidence_lines: list[str] = []
+        for profile in race_profiles:
+            found = False
+            profile_evidence: list[str] = []
+
+            if profile["service_uuid"] in service_uuids:
+                found = True
+                profile_evidence.append(
+                    f"{profile['label']} service {profile['service_uuid']}"
+                )
+
+            present_chars: list[str] = []
+            if profile["rx_uuid"] in char_uuids:
+                found = True
+                present_chars.append(f"RX {profile['rx_uuid']}")
+            if profile["tx_uuid"] in char_uuids:
+                found = True
+                present_chars.append(f"TX {profile['tx_uuid']}")
+
+            if found:
+                if not profile_evidence:
+                    profile_evidence.append(f"{profile['label']} characteristics found")
+                if present_chars:
+                    profile_evidence.append(
+                        f"Characteristics: {', '.join(present_chars)}"
+                    )
+                evidence_lines.extend(profile_evidence)
+
+        if not evidence_lines:
+            return []
+
+        addr_arg = device_address or "<device_address>"
+        return [
+            {
+                "id": "CVE-2025-20700",
+                "title": "Missing GATT authentication (RACE service)",
+                "status": "POTENTIAL",
+                "evidence": evidence_lines,
+                "poc": f"python race_toolkit.py --transport gatt --target-address {addr_arg} sdkinfo",
+            },
+            {
+                "id": "CVE-2025-20702_LE",
+                "title": "RACE protocol exposed over BLE",
+                "status": "POTENTIAL",
+                "evidence": evidence_lines,
+                "poc": f"python race_toolkit.py --transport gatt --target-address {addr_arg} enumerate-race",
+            },
+        ]
+
     print(f"\n\033[1;36m{'═' * term_width}\033[0m")
     print("\033[1;36m  BLE DEVICE ENUMERATION\033[0m")
     print(f"\033[1;36m{'═' * term_width}\033[0m")
@@ -6130,8 +6405,13 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
             )
 
             try:
+                device_context = {
+                    "name": device_info.get("name"),
+                    "manufacturer": device_info.get("manufacturer"),
+                    "model": device_info.get("model"),
+                }
                 research = await research_unknown_characteristics(
-                    unknown_characteristics, target_address
+                    unknown_characteristics, target_address, device_context
                 )
                 print_research_results(research, unknown_characteristics, term_width)
             except Exception as e:
@@ -6147,6 +6427,8 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                 )
                 for uuid, _, _ in unknown_characteristics[:3]:
                     print(f'    → Google: "{uuid}"')
+
+        cve_findings = collect_cve_findings(services_found, target_address)
 
         # Build comprehensive device summary from all read values
         print_header("DEVICE SUMMARY")
@@ -6537,6 +6819,22 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                 for char_name, formatted_value in values:
                     print_field(char_name, formatted_value, indent=6)
 
+        print(
+            "\n  \033[1;35m┌─ CVE FINDINGS ────────────────────────────────────────────┐\033[0m"
+        )
+        if cve_findings:
+            for finding in cve_findings:
+                print(
+                    f"    \033[1;33m{finding['id']}\033[0m: {finding['title']} ({finding['status']})"
+                )
+                for evidence in finding.get("evidence", []):
+                    print(f"      Evidence: {evidence}")
+                print(f"      PoC: {finding['poc']}")
+        else:
+            print(
+                "    No known CVEs matched to detected services/characteristics."
+            )
+
         # ═══════════════════════════════════════════════════════════════════
         # ENUMERATION STATISTICS
         # ═══════════════════════════════════════════════════════════════════
@@ -6734,6 +7032,7 @@ async def command_ble_speaker(args: argparse.Namespace):
                     f"  \033[1;32mConnected!\033[0m Handle: 0x{connection.handle:04X}\n"
                 )
                 break  # Success!
+
             except bumble.core.TimeoutError:
                 print(f"  \033[1;31mConnection timed out after {timeout}s\033[0m")
                 if addr_type_name == address_types[-1][1]:
@@ -7271,6 +7570,7 @@ async def command_avrcp(args: argparse.Namespace):
         # Create a minimal delegate
         class MinimalDelegate(avrcp.Delegate):
             """Minimal AVRCP delegate for unauthenticated control."""
+
             # pylint: disable=missing-function-docstring
 
             def __init__(self) -> None:
