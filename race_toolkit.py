@@ -2210,7 +2210,7 @@ async def command_ble_scan(args: argparse.Namespace):
         HCI_LE_Set_Scan_Parameters_Command,
         HCI_LE_Set_Scan_Enable_Command,
     )
-    from bumble.core import AdvertisingData, UUID as BumbleUUID
+    from bumble.core import AdvertisingData, TimeoutError as BumbleTimeoutError, UUID as BumbleUUID
     import shutil
 
     controller = args.controller or "usb:0"
@@ -2943,10 +2943,7 @@ async def command_ble_scan(args: argparse.Namespace):
                 clean_addr = addr_str.replace("/P", "")
                 target = Address(clean_addr)
 
-                connection = await asyncio.wait_for(
-                    device.connect(target),
-                    timeout=3.0,  # Short timeout
-                )
+                connection = await device.connect(target, timeout=3.0)
 
                 peer = Peer(connection)
                 try:
@@ -3017,7 +3014,7 @@ async def command_ble_scan(args: argparse.Namespace):
                 if service_types:
                     info["device_type"] = "/".join(set(service_types))
 
-            except asyncio.TimeoutError:
+            except BumbleTimeoutError:
                 info["connectable"] = False
             except Exception:  # pylint: disable=broad-exception-caught
                 info["connectable"] = False
@@ -4997,6 +4994,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
     - Manufacturer, Model, Serial, Firmware (Device Information Service)
     - All available GATT services and characteristics
     """
+    import bumble.core
     import bumble.hci
     from bumble.device import Device, DeviceConfiguration, Peer
     from bumble.transport import open_transport_or_link
@@ -5478,10 +5476,10 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
             # Explicit random address
             address_types = [(Address.RANDOM_DEVICE_ADDRESS, "random")]
         else:
-            # Auto-detect: try public first (most common for commercial devices), then random
+            # Auto-detect: try random first, then public
             address_types = [
-                (Address.PUBLIC_DEVICE_ADDRESS, "public"),
                 (Address.RANDOM_DEVICE_ADDRESS, "random"),
+                (Address.PUBLIC_DEVICE_ADDRESS, "public"),
             ]
 
         # Try each address type
@@ -5511,18 +5509,9 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                 )
 
                 try:
-                    connection = await asyncio.wait_for(
-                        device.connect(target), timeout=timeout
-                    )
-                except asyncio.TimeoutError:
+                    connection = await device.connect(target, timeout=timeout)
+                except bumble.core.TimeoutError:
                     print(f"  \033[1;31mConnection timed out after {timeout}s\033[0m")
-                    # Cancel the pending connection
-                    try:
-                        await device.host.send_command(
-                            bumble.hci.HCI_LE_Create_Connection_Cancel_Command()
-                        )
-                    except Exception:
-                        pass
                     if attempt == max_retries:
                         break  # Try next address type
                     continue
@@ -6724,10 +6713,10 @@ async def command_ble_speaker(args: argparse.Namespace):
             # Explicit random address
             address_types = [(Address.RANDOM_DEVICE_ADDRESS, "random")]
         else:
-            # Auto-detect: try public first (most common for commercial devices), then random
+            # Auto-detect: try random first, then public
             address_types = [
-                (Address.PUBLIC_DEVICE_ADDRESS, "public"),
                 (Address.RANDOM_DEVICE_ADDRESS, "random"),
+                (Address.PUBLIC_DEVICE_ADDRESS, "public"),
             ]
 
         connection = None
@@ -6740,14 +6729,12 @@ async def command_ble_speaker(args: argparse.Namespace):
             print(f"  Connecting to {addr_str} ({addr_type_name})...")
 
             try:
-                connection = await asyncio.wait_for(
-                    device.connect(address), timeout=timeout
-                )
+                connection = await device.connect(address, timeout=timeout)
                 print(
                     f"  \033[1;32mConnected!\033[0m Handle: 0x{connection.handle:04X}\n"
                 )
                 break  # Success!
-            except asyncio.TimeoutError:
+            except bumble.core.TimeoutError:
                 print(f"  \033[1;31mConnection timed out after {timeout}s\033[0m")
                 if addr_type_name == address_types[-1][1]:
                     raise  # Last attempt, propagate error

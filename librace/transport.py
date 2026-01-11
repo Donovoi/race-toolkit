@@ -1,7 +1,6 @@
 import logging
 import sys
 from typing import Any, Callable, List
-import hid
 import struct
 import asyncio
 
@@ -954,6 +953,7 @@ class USBHIDTransport(Transport):
         self.device = None
         self.recv_fn = None
         self.device_name = None
+        self._hid = None
 
         # try to parse USB device if given
         self.vid = None
@@ -968,7 +968,22 @@ class USBHIDTransport(Transport):
                     f"Unknown USB device {device_str}. Please provice the device as VID:PID pair."
                 )
 
+    def _require_hid(self):
+        if self._hid is None:
+            try:
+                import hid as hid_module  # type: ignore[import-not-found]
+            except ImportError as exc:
+                raise ImportError(
+                    "HID API backend not available. Install hidapi shared libraries. "
+                    "On Debian/Ubuntu: `sudo apt install libhidapi-hidraw0 libhidapi-libusb0`. "
+                    "On Fedora: `sudo dnf install hidapi`. "
+                    "On macOS: `brew install hidapi`."
+                ) from exc
+            self._hid = hid_module
+        return self._hid
+
     async def setup(self, recv_fn: Callable):
+        hid = self._require_hid()
         if self.device is None:
             if self.vid is None and self.pid is None:
                 devices = hid.enumerate()
