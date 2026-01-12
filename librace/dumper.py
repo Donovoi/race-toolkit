@@ -3,6 +3,7 @@
 This module provides classes for dumping RAM and Flash memory from
 devices using the RACE protocol.
 """
+
 import asyncio
 import io
 import logging
@@ -64,7 +65,7 @@ class RACEDumper:
         self,
         addr: Optional[int] = None,
         size: Optional[int] = None,
-        fd: Optional[io.IOBase] = None
+        fd: Optional[io.IOBase] = None,
     ) -> bytes:
         """Dump memory from the target device.
 
@@ -86,27 +87,47 @@ class RACEDumper:
 
         # Calculate total units for progress bar
         total_units = self.size // self.unit_size
+        successful_reads = 0
 
         if self.progress:
             with tqdm(
                 total=total_units,
                 desc=f"{self.verb} {self.desc}",
-                unit=self.unit
+                unit=self.unit,
+                disable=None,  # Will be disabled if not a tty
             ) as pbar:
                 address = self.start
                 while address < self.start + self.size:
                     race_packet = self.packet_prep(address)
                     await self.send(race_packet)
 
+                    # Track if this read succeeds
+                    prev_len = len(self.outbuf)
+
                     # Wait for response before proceeding to the next page
                     await self.await_response(address)
 
-                    # Update progress bar by one unit
-                    pbar.update(1)
+                    # Only update progress bar and count if we got data
+                    if len(self.outbuf) > prev_len:
+                        successful_reads += 1
+                        pbar.update(1)
+                    else:
+                        # Still update progress bar position but don't count as success
+                        pbar.update(1)
+
                     address += self.unit_size
-            if self.had_errors:
+
+            # Only log completion messages if we attempted reads
+            if successful_reads == 0 and self.had_errors:
+                # All reads failed - don't log "completed with errors", the caller handles this
+                pass
+            elif self.had_errors:
                 logging.warning(
-                    "%s dump completed with errors (some pages failed).", self.desc)
+                    "%s dump completed with errors (%d/%d pages succeeded).",
+                    self.desc,
+                    successful_reads,
+                    total_units,
+                )
             else:
                 logging.info("%s dump completed successfully.", self.desc)
         else:
@@ -215,20 +236,27 @@ class RACERAMDumper(RACEDumper):
         if race_header.id == RaceId.RACE_READ_ADDRESS:
             packet = ReadAddressResponse.unpack(data)
             if packet.return_code != 0:
-                logging.error(
-                    "ERROR while reading at address %#x. Result: %d",
-                    packet.page_address, packet.return_code
-                )
+                # Validate parsed values look reasonable before logging them
+                if packet.page_address > 0x10000000:
+                    logging.debug(
+                        "RAM read failed with return code %d (response may contain error payload)",
+                        packet.return_code,
+                    )
+                else:
+                    logging.debug(
+                        "RAM read failed at address %#x, return code %d",
+                        packet.page_address,
+                        packet.return_code,
+                    )
                 # Return None to indicate read failure - don't return garbage
                 return None
             return packet.page_data
         # We got some unexpected packet
         packet = RacePacket.unpack(data)
-        logging.error(
-            "ERROR got an unexpected packet with ID %#x and payload:",
-            packet.header.id
+        logging.debug(
+            "Unexpected response packet ID %#x (expected RAM read response)",
+            packet.header.id,
         )
-        hexdump(packet.payload)
         return None
 
 
@@ -265,18 +293,27 @@ class RACEFlashDumper(RACEDumper):
         if race_header.id == RaceId.RACE_STORAGE_PAGE_READ:
             packet = ReadFlashPageResponse.unpack(data)
             if packet.return_code != 0:
-                logging.error(
-                    "ERROR while reading at address %#x from storage type %d. Result: %d",
-                    packet.page_address, packet.storage_type, packet.return_code
-                )
+                # Validate parsed values look reasonable before logging them
+                # If values look like garbage (e.g., parsed from error text), log generically
+                if packet.storage_type > 10 or packet.page_address > 0x10000000:
+                    logging.debug(
+                        "Flash read failed with return code %d (response may contain error payload)",
+                        packet.return_code,
+                    )
+                else:
+                    logging.debug(
+                        "Flash read failed at address %#x, storage type %d, return code %d",
+                        packet.page_address,
+                        packet.storage_type,
+                        packet.return_code,
+                    )
                 # Return None to indicate read failure - don't return garbage
                 return None
             return packet.page_data
         # We got some unexpected packet that's not a ReadFlashPageResponse
         packet = RacePacket.unpack(data)
-        logging.error(
-            "ERROR got an unexpected packet with ID %#x and payload:",
-            packet.header.id
+        logging.debug(
+            "Unexpected response packet ID %#x (expected flash read response)",
+            packet.header.id,
         )
-        hexdump(packet.payload)
         return None
