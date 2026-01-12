@@ -1149,6 +1149,39 @@ def parse_args():
         help="Connection timeout in seconds (default: 10)",
     )
 
+    # RFParty-style BLE Scanner with Web UI
+    rfparty_parser = subparsers.add_parser(
+        "rfparty",
+        help="RFParty-style BLE scanner with interactive web UI and map visualization",
+    )
+    rfparty_parser.add_argument(
+        "--port",
+        type=int,
+        default=8888,
+        help="HTTP server port (default: 8888)",
+    )
+    rfparty_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Don't automatically open browser",
+    )
+    rfparty_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0,
+        help="Scan duration in seconds (0 = continuous until Ctrl+C)",
+    )
+    rfparty_parser.add_argument(
+        "--filter",
+        type=str,
+        help="Filter by device name (substring match)",
+    )
+    rfparty_parser.add_argument(
+        "--filter-addr",
+        type=str,
+        help="Filter by MAC address (prefix match)",
+    )
+
     return parser.parse_args()
 
 
@@ -8158,6 +8191,220 @@ async def command_avrcp(args: argparse.Namespace):
         await checker.close()
 
 
+async def command_rfparty(args: argparse.Namespace):
+    """RFParty-style BLE scanner with interactive web UI.
+
+    This command launches a local web server with a map-based UI for BLE scanning,
+    similar to the rfparty mobile app. Devices are displayed on an interactive
+    Leaflet map with details panel for inspection and data export.
+
+    The scanner uses Bumble for BLE scanning and streams results to the browser
+    via Server-Sent Events (SSE) for real-time updates.
+    """
+    from bumble.device import Device, DeviceConfiguration
+    from bumble.transport import open_transport_or_link
+    from bumble.core import AdvertisingData
+    import signal
+
+    from librace.rfparty_server import RFPartyScanner, RFPartyServer
+
+    controller = args.controller or "usb:0"
+    port = getattr(args, "port", 8888)
+    no_browser = getattr(args, "no_browser", False)
+    timeout = getattr(args, "timeout", 0)
+    name_filter = getattr(args, "filter", None)
+    addr_filter = getattr(args, "filter_addr", None)
+
+    # Extended Manufacturer Company IDs
+    companies = {
+        0x0006: "Microsoft",
+        0x004C: "Apple",
+        0x0059: "Nordic",
+        0x0075: "Samsung",
+        0x009E: "Bose",
+        0x00E0: "Google",
+        0x012D: "Sony",
+        0x0157: "Xiaomi",
+        0x0171: "Amazon",
+        0x027D: "Huawei",
+        0x0269: "Fitbit",
+        0x02FF: "Jabra",
+        0x038F: "Tile",
+        0x030F: "Realtek",
+    }
+
+    # Release Bluetooth controller
+    release_bluetooth_controller(controller)
+
+    # Create scanner and server
+    scanner = RFPartyScanner(controller)
+    server = RFPartyServer(scanner, port=port)
+
+    running = [True]
+    device = None
+
+    def signal_handler(_sig: int, _frame: object) -> None:
+        running[0] = False
+        print("\n\033[0;33mShutting down...\033[0m")
+
+    original_handler = signal.signal(signal.SIGINT, signal_handler)
+
+    term_width = min(os.get_terminal_size().columns, 100)
+    print(f"\n\033[1;35m{'═' * term_width}\033[0m")
+    print("\033[1;35m  🎉 RFPARTY BLE SCANNER\033[0m")
+    print(f"\033[1;35m{'═' * term_width}\033[0m\n")
+    print(f"  Server: http://localhost:{port}")
+    print(f"  Controller: {controller}")
+    if name_filter:
+        print(f"  Name Filter: {name_filter}")
+    if addr_filter:
+        print(f"  Address Filter: {addr_filter}")
+    print("\n  Press Ctrl+C to stop\n")
+
+    try:
+        # Start the web server
+        server.start(open_browser=not no_browser)
+        print(f"  \033[1;32m✓ Web server started at http://localhost:{port}\033[0m")
+
+        # Open Bumble transport
+        async with await open_transport_or_link(controller) as (hci_source, hci_sink):
+            device = Device("RFParty Scanner", host=hci_source, host_sink=hci_sink)
+
+            # Set up scanning callback
+            @device.on("advertisement")
+            def on_advertisement(advertisement):
+                addr = str(advertisement.address)
+
+                # Apply filters
+                if addr_filter and not addr.lower().startswith(addr_filter.lower()):
+                    return
+
+                # Extract name
+                name = None
+                if advertisement.data:
+                    name = advertisement.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
+                    if not name:
+                        name = advertisement.data.get(
+                            AdvertisingData.SHORTENED_LOCAL_NAME
+                        )
+
+                if name_filter and name and name_filter.lower() not in name.lower():
+                    return
+                if name_filter and not name:
+                    return
+
+                # Extract manufacturer
+                manufacturer_id = None
+                manufacturer_name = None
+                if advertisement.data:
+                    mfr_data = advertisement.data.get(
+                        AdvertisingData.MANUFACTURER_SPECIFIC_DATA
+                    )
+                    if mfr_data:
+                        if isinstance(mfr_data, tuple) and len(mfr_data) >= 1:
+                            manufacturer_id = mfr_data[0]
+                        elif isinstance(mfr_data, bytes) and len(mfr_data) >= 2:
+                            manufacturer_id = struct.unpack("<H", mfr_data[:2])[0]
+                        if manufacturer_id:
+                            manufacturer_name = companies.get(
+                                manufacturer_id, f"0x{manufacturer_id:04X}"
+                            )
+
+                # Extract services
+                services = []
+                if advertisement.data:
+                    for uuid_type in [
+                        AdvertisingData.COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
+                        AdvertisingData.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
+                        AdvertisingData.COMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS,
+                        AdvertisingData.INCOMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS,
+                    ]:
+                        uuids = advertisement.data.get(uuid_type)
+                        if uuids:
+                            if isinstance(uuids, (bytes, bytearray)):
+                                services.append(uuids.hex())
+                            elif isinstance(uuids, list):
+                                for u in uuids:
+                                    services.append(str(u))
+
+                # Get raw advertisement data
+                raw_data = b""
+                if hasattr(advertisement, "data") and advertisement.data:
+                    try:
+                        raw_data = bytes(advertisement.data.to_bytes())
+                    except Exception:
+                        pass
+
+                # Determine address type
+                addr_type = "unknown"
+                if hasattr(advertisement.address, "address_type"):
+                    if advertisement.address.address_type == 0:
+                        addr_type = "public"
+                    elif advertisement.address.address_type == 1:
+                        addr_type = "random"
+
+                # Feed to scanner
+                scanner.on_device(
+                    address=addr,
+                    name=name,
+                    rssi=advertisement.rssi if advertisement.rssi else -100,
+                    address_type=addr_type,
+                    connectable=bool(advertisement.is_connectable)
+                    if hasattr(advertisement, "is_connectable")
+                    else False,
+                    advertisement_data=raw_data,
+                    services=services,
+                    manufacturer_id=manufacturer_id,
+                    manufacturer_name=manufacturer_name,
+                )
+
+            # Power on and start scanning
+            await device.power_on()
+            print("  \033[1;32m✓ Bluetooth powered on\033[0m")
+
+            await device.start_scanning(active=True)
+            print("  \033[1;32m✓ BLE scanning started\033[0m")
+            print(
+                f"\n  \033[0;36mOpen http://localhost:{port} in your browser\033[0m\n"
+            )
+
+            start_time = time.time()
+
+            # Main loop
+            while running[0]:
+                await asyncio.sleep(0.5)
+
+                # Check timeout
+                if timeout > 0 and (time.time() - start_time) >= timeout:
+                    print(f"\n  Timeout reached ({timeout}s)")
+                    break
+
+                # Print periodic status
+                elapsed = int(time.time() - start_time)
+                if elapsed > 0 and elapsed % 30 == 0:
+                    stats = scanner.get_stats()
+                    print(
+                        f"  [{elapsed}s] {stats['deviceCount']} devices, {stats['packetCount']} packets"
+                    )
+
+            await device.stop_scanning()
+
+    except Exception as e:
+        logging.error("RFParty scanner failed: %s", e)
+        traceback.print_exc()
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
+        server.stop()
+        print("\n  \033[1;32m✓ Scanner stopped\033[0m")
+
+        # Print final stats
+        stats = scanner.get_stats()
+        print(
+            f"\n  Final: {stats['deviceCount']} devices discovered, {stats['packetCount']} packets"
+        )
+        print(f"\n\033[1;35m{'═' * term_width}\033[0m\n")
+
+
 async def command_enumerate_classic(args: argparse.Namespace):
     """Enumerate Bluetooth Classic services without pairing (CVE-2025-20701 PoC).
 
@@ -9739,6 +9986,9 @@ async def main():
         return
     if args.command == "avrcp":
         await command_avrcp(args)
+        return
+    if args.command == "rfparty":
+        await command_rfparty(args)
         return
 
     # Initialize the transport class based on the given technology and target UUIDs

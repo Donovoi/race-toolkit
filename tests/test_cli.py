@@ -217,6 +217,39 @@ class TestParseArgsCommands:
         finally:
             sys.argv = old_argv
 
+    def test_rfparty_command(self):
+        """rfparty command should parse with options."""
+        old_argv = sys.argv
+        sys.argv = ["race_toolkit.py", "rfparty"]
+        try:
+            args = self.parse_args()
+            assert args.command == "rfparty"
+            assert args.port == 8888
+            assert args.no_browser is False
+        finally:
+            sys.argv = old_argv
+
+    def test_rfparty_command_with_options(self):
+        """rfparty command should accept custom options."""
+        old_argv = sys.argv
+        sys.argv = [
+            "race_toolkit.py",
+            "rfparty",
+            "--port",
+            "9000",
+            "--no-browser",
+            "--filter",
+            "AirPods",
+        ]
+        try:
+            args = self.parse_args()
+            assert args.command == "rfparty"
+            assert args.port == 9000
+            assert args.no_browser is True
+            assert args.filter == "AirPods"
+        finally:
+            sys.argv = old_argv
+
 
 class TestParseArgsFlags:
     """Tests for global flag parsing."""

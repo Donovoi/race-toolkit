@@ -17,7 +17,36 @@ librace/
 ├── constants.py         # RaceId/RaceType enums, UUIDs (re-exports from other modules)
 ├── ble_tables.py        # BLE UUID lookup tables (GATT services, characteristics)
 ├── manufacturer_ids.py  # Bluetooth company ID database
-└── parttable.py         # Flash partition table parser
+├── parttable.py         # Flash partition table parser
+└── rfparty_server.py    # RFParty-style BLE scanner with web UI
+```
+
+### RFParty Integration
+
+The `rfparty` command provides a web-based BLE scanner UI inspired by the [rfparty mobile app](https://github.com/datapartyjs/rfparty-mobile). It uses:
+
+- **Python BLE scanning** via Bumble (not Cordova plugins)
+- **Leaflet maps** for device visualization
+- **Server-Sent Events** for real-time updates to browser
+- **Embedded HTML/CSS/JS** in `rfparty_server.py` (no external dependencies)
+
+**Related external repo**: `~/rfparty-mobile-fork` contains the original Cordova mobile app. This is kept separate since it's a JavaScript/mobile project with different tooling. Updates to that repo don't affect race-toolkit directly, but we share similar data formats for interoperability.
+
+**Running RFParty scanner**:
+
+```bash
+uv run python race_toolkit.py -c usb:0 rfparty
+uv run python race_toolkit.py -c usb:0 rfparty --port 9000 --no-browser
+uv run python race_toolkit.py -c usb:0 rfparty --filter "AirPods" --timeout 60
+```
+
+**Updating rfparty-mobile-fork**: The fork at `~/rfparty-mobile-fork` can be updated independently:
+
+```bash
+cd ~/rfparty-mobile-fork
+git pull origin main
+npm install
+npm run build
 ```
 
 ### Key Patterns
