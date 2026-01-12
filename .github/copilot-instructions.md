@@ -23,16 +23,28 @@ librace/
 
 ### RFParty Integration
 
-The `rfparty` command provides a web-based BLE scanner UI inspired by the [rfparty mobile app](https://github.com/datapartyjs/rfparty-mobile). It uses:
+The `rfparty` command provides a web-based BLE scanner UI inspired by the [rfparty mobile app](https://github.com/datapartyjs/rfparty-mobile).
 
-- **Python BLE scanning** via Bumble (not Cordova plugins)
+**Current implementation** (Python backend):
+
+- **Python BLE scanning** via Bumble (requires USB dongle)
 - **Leaflet maps** for device visualization
 - **Server-Sent Events** for real-time updates to browser
 - **Embedded HTML/CSS/JS** in `rfparty_server.py` (no external dependencies)
 
-**Related external repo**: `~/rfparty-mobile-fork` contains the original Cordova mobile app. This is kept separate since it's a JavaScript/mobile project with different tooling. Updates to that repo don't affect race-toolkit directly, but we share similar data formats for interoperability.
+**Future: WebAssembly Build** (planned for `~/rfparty-mobile-fork`):
+The goal is to compile rfparty to WASM so it runs entirely in the browser on any device using Web Bluetooth API. This eliminates the need for a Python backend or USB dongle.
 
-**Running RFParty scanner**:
+**Related external repo**: `~/rfparty-mobile-fork` contains the rfparty fork being developed for WASM compilation. This is kept separate since it's a JavaScript/TypeScript project with different tooling. The two approaches:
+
+| Feature      | Python (`rfparty` cmd)  | WASM (rfparty-mobile-fork) |
+| ------------ | ----------------------- | -------------------------- |
+| BLE Access   | Bumble via USB dongle   | Web Bluetooth API          |
+| Runs on      | Linux/macOS with dongle | Any device with browser    |
+| Dependencies | Python, bumble          | None (static WASM)         |
+| Deployment   | Local CLI               | Static hosting anywhere    |
+
+**Running RFParty scanner** (current Python version):
 
 ```bash
 uv run python race_toolkit.py -c usb:0 rfparty
@@ -40,14 +52,22 @@ uv run python race_toolkit.py -c usb:0 rfparty --port 9000 --no-browser
 uv run python race_toolkit.py -c usb:0 rfparty --filter "AirPods" --timeout 60
 ```
 
-**Updating rfparty-mobile-fork**: The fork at `~/rfparty-mobile-fork` can be updated independently:
+**Building rfparty-mobile-fork for WASM** (work in progress):
 
 ```bash
 cd ~/rfparty-mobile-fork
-git pull origin main
 npm install
-npm run build
+npm run build:wasm    # Compiles to WebAssembly
+npm run serve         # Serves static WASM build locally
 ```
+
+**WASM architecture notes**:
+
+- Uses [Emscripten](https://emscripten.org/) or [wasm-pack](https://rustwasm.github.io/wasm-pack/) for compilation
+- Web Bluetooth API provides BLE access (Chrome, Edge, Opera - not Firefox/Safari)
+- Geolocation via browser's `navigator.geolocation`
+- IndexedDB for local data persistence
+- Can be hosted as static files on GitHub Pages, Netlify, etc.
 
 ### Key Patterns
 
