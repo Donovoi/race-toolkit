@@ -244,7 +244,7 @@ def release_bluetooth_controller(controller: str):
 
 
 _bluetooth_services_to_restore: set[str] = set()
-_bluetooth_restore_registered = False
+_bluetooth_restore_state: dict[str, bool] = {"registered": False}
 
 
 def _systemctl_is_active(service: str) -> bool:
@@ -286,13 +286,12 @@ def _restore_bluetooth_services() -> None:
 
 
 def _register_bluetooth_restore() -> None:
-    global _bluetooth_restore_registered
-    if _bluetooth_restore_registered:
+    if _bluetooth_restore_state["registered"]:
         return
     import atexit
 
     atexit.register(_restore_bluetooth_services)
-    _bluetooth_restore_registered = True
+    _bluetooth_restore_state["registered"] = True
 
 
 def _parse_usb_vid_pid(spec: str) -> tuple[int, int] | None:
@@ -5194,8 +5193,8 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
     - Manufacturer, Model, Serial, Firmware (Device Information Service)
     - All available GATT services and characteristics
     """
-    import bumble.core
-    import bumble.hci
+    import bumble.core as bumble_core
+    import bumble.hci as bumble_hci
     from bumble.device import Device, DeviceConfiguration, Peer
     from bumble.transport import open_transport_or_link
     from bumble.hci import Address
@@ -5773,7 +5772,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                     # Cancel any pending connection and reset controller state
                     try:
                         await device.host.send_command(
-                            bumble.hci.HCI_LE_Create_Connection_Cancel_Command()
+                            bumble_hci.HCI_LE_Create_Connection_Cancel_Command()
                         )
                     except Exception:
                         pass
@@ -5785,7 +5784,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
 
                 try:
                     connection = await device.connect(target, timeout=timeout)
-                except bumble.core.TimeoutError:
+                except bumble_core.TimeoutError:
                     print(f"  \033[1;31mConnection timed out after {timeout}s\033[0m")
                     if attempt == max_retries:
                         break  # Try next address type
@@ -6831,9 +6830,7 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
                     print(f"      Evidence: {evidence}")
                 print(f"      PoC: {finding['poc']}")
         else:
-            print(
-                "    No known CVEs matched to detected services/characteristics."
-            )
+            print("    No known CVEs matched to detected services/characteristics.")
 
         # ═══════════════════════════════════════════════════════════════════
         # ENUMERATION STATISTICS
@@ -6962,6 +6959,7 @@ async def command_ble_speaker(args: argparse.Namespace):
 
     This is a proof-of-concept for demonstrating BLE audio device security.
     """
+    import bumble.core as bumble_core
     from bumble.device import Device, DeviceConfiguration, Peer
     from bumble.transport import open_transport_or_link
     from bumble.hci import Address
@@ -7033,7 +7031,7 @@ async def command_ble_speaker(args: argparse.Namespace):
                 )
                 break  # Success!
 
-            except bumble.core.TimeoutError:
+            except bumble_core.TimeoutError:
                 print(f"  \033[1;31mConnection timed out after {timeout}s\033[0m")
                 if addr_type_name == address_types[-1][1]:
                     raise  # Last attempt, propagate error
@@ -8290,13 +8288,14 @@ async def command_hfp_demo(args: argparse.Namespace):
         # Wrap the protocol's AT command reader to log incoming data
         original_read_at = ag_protocol._read_at  # pylint: disable=protected-access
 
-        def logged_read_at(data: bytes | bytearray | str):
-            if isinstance(data, bytes):
-                text = data.decode("utf-8", errors="replace").strip()
+        def logged_read_at(data: bytes | bytearray | memoryview | str):
+            if isinstance(data, str):
+                payload = data.encode("utf-8", errors="replace")
             else:
-                text = str(data).strip()
+                payload = bytes(data)
+            text = payload.decode("utf-8", errors="replace").strip()
             logging.debug("<<< RX (HF->AG): %s", repr(text))
-            return original_read_at(data)
+            return original_read_at(payload)
 
         ag_protocol._read_at = logged_read_at  # pylint: disable=protected-access
         dlc.sink = ag_protocol._read_at  # pylint: disable=protected-access
@@ -8628,7 +8627,7 @@ async def command_hfp_demo(args: argparse.Namespace):
                         # Use list to allow modification in closure
                         sco_handle = [None]
 
-                        def on_sco_connection(sco_link: object) -> None:
+                        def on_sco_connection(sco_link: Any) -> None:
                             """Handle SCO connection complete event.
 
                             Args:
