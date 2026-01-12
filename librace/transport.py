@@ -171,7 +171,9 @@ class GATTBleakTransport(Transport):
 class BumbleTransport(Transport):
     """Generic Class for all Bumble based Transport. Does most of the Bumble and device handling"""
 
-    def __init__(self, ctrl_dev: Device, address: str, authenticate: bool):
+    def __init__(
+        self, ctrl_dev: Device, address: str | Address, authenticate: bool
+    ):
         self.ctrl_dev = ctrl_dev
         self.address = address
         self.connection = None
@@ -260,7 +262,7 @@ class BumbleTransport(Transport):
 class GATTBumbleChecker(BumbleTransport):
     """This class is used to identify a user's device and check for the RACE GATT UUID(s)"""
 
-    def __init__(self, ctrl_dev: str, addr: str, scan_time: int = 5):
+    def __init__(self, ctrl_dev: str, addr: str | Address, scan_time: int = 5):
         super().__init__(ctrl_dev, addr, False)
         self.rx_char = None
         self.tx_char = None
@@ -448,7 +450,7 @@ class GATTBumbleChecker(BumbleTransport):
 
 
 class RFCOMMBumbleChecker(BumbleTransport):
-    def __init__(self, ctrl_dev: str, address: str, authenticate: bool):
+    def __init__(self, ctrl_dev: str, address: str | Address, authenticate: bool):
         super().__init__(ctrl_dev, address, authenticate)
         self.device = None
         self.rfcomm_session = None
@@ -551,7 +553,7 @@ class GATTBumbleTransport(BumbleTransport):
     def __init__(
         self,
         ctrl_dev: str,
-        addr: str,
+        addr: str | Address,
         devices: List[str],
         authenticate: bool,
         scan_time: int = 2,
@@ -866,7 +868,11 @@ class GATTBumbleTransport(BumbleTransport):
 
 class RFCOMMTransport(BumbleTransport):
     def __init__(
-        self, ctrl_dev: str, address: str, authenticate: bool, uuid: UUID = None
+        self,
+        ctrl_dev: str,
+        address: str | Address,
+        authenticate: bool,
+        uuid: UUID = None,
     ):
         super().__init__(ctrl_dev, address, authenticate)
         self.device = None

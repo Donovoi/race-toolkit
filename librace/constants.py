@@ -1,6 +1,40 @@
 from enum import IntEnum
 from bumble.core import UUID
 
+# Re-export BLE lookup tables for convenient access
+from librace.ble_tables import (
+    GATT_SERVICES,
+    GATT_CHARACTERISTICS,
+    GATT_DESCRIPTORS,
+    GATT_DECLARATIONS,
+    GATT_UNITS,
+    PROTOCOL_IDENTIFIERS,
+    SERVICE_CLASSES_AND_PROFILES,
+    SDO_GATT_SERVICES,
+    KNOWN_PRODUCT_UUIDS,
+    APPLE_CONTINUITY_TYPES,
+    APPLE_NEARBY_INFO_ACTION_CODES,
+    APPLE_NEARBY_ACTION_TYPES,
+    GAP_AD_TYPES,
+    lookup_uuid16,
+    lookup_uuid128,
+    lookup_apple_continuity_type,
+)
+
+# Re-export manufacturer lookup
+from librace.manufacturer_ids import (
+    MANUFACTURER_COMPANY_IDS,
+    lookup_manufacturer,
+    lookup_manufacturer_by_int,
+    parse_manufacturer_data,
+    APPLE_COMPANY_ID,
+    MICROSOFT_COMPANY_ID,
+    GOOGLE_COMPANY_ID,
+    SAMSUNG_COMPANY_ID,
+    SONY_COMPANY_ID,
+    BOSE_COMPANY_ID,
+)
+
 
 class RaceId(IntEnum):
     RACE_FOTA_COMMIT = 0x1C02

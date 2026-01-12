@@ -9,7 +9,6 @@ from affected devices.
 
 import argparse
 import asyncio
-import bumble
 import fcntl
 import glob
 import logging
@@ -23,6 +22,7 @@ import traceback
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Callable, cast
+from bumble.hci import Address
 
 try:
     from usb1 import USBErrorBusy  # type: ignore[import-not-found]
@@ -176,7 +176,7 @@ def sanitize_address(addr: object) -> str:
 
     addr_str = str(addr)
     # Remove emoji variation selectors for consistent matching
-    addr_str = addr_str.replace("\uFE0F", "").replace("\uFE0E", "")
+    addr_str = addr_str.replace("\ufe0f", "").replace("\ufe0e", "")
 
     # Check for /P suffix (public address indicator)
     has_suffix = "/P" in addr_str
@@ -1515,7 +1515,7 @@ def _select_ble_candidate(
 
 async def _resolve_ble_target(
     args: argparse.Namespace,
-) -> tuple[str | None, object | None, str | None]:
+) -> tuple[str | None, Address | None, str | None]:
     """Resolve target BLE address via scan or direct input."""
     if args.target_address:
         logging.info(
@@ -1535,9 +1535,7 @@ async def _resolve_ble_target(
         logging.error("No BLE devices found. Try --scan-time or --filter.")
         return None, None, None
 
-    selected = _select_ble_candidate(
-        candidates, getattr(args, "interactive", True)
-    )
+    selected = _select_ble_candidate(candidates, getattr(args, "interactive", True))
     if not selected:
         logging.info("No BLE device selected.")
         return None, None, None
@@ -3423,7 +3421,9 @@ async def command_ble_scan(args: argparse.Namespace):
                     keyword in appearance_lower for keyword in ("headphone", "headset")
                 ):
                     audio_type = "Headphones/Headset"
-                elif any(keyword in name_lower for keyword in ("speaker", "soundbar")) or any(
+                elif any(
+                    keyword in name_lower for keyword in ("speaker", "soundbar")
+                ) or any(
                     keyword in appearance_lower for keyword in ("speaker", "audio sink")
                 ):
                     audio_type = "Speaker/Audio"
@@ -7159,6 +7159,7 @@ async def _run_ble_workflow(
     race_action: Callable[[RACE], Any],
 ) -> None:
     """Run scan -> ble-info -> RACE workflow for a target device."""
+
     def _log_race_guidance() -> None:
         if args.authenticate:
             logging.info(
@@ -7210,9 +7211,7 @@ async def _run_ble_workflow(
     except asyncio.TimeoutError as exc:
         logging.error("RACE step timed out: %s", exc)
         if "No inbound RACE notifications observed" in str(exc):
-            logging.info(
-                "RACE service is present but not responding to commands."
-            )
+            logging.info("RACE service is present but not responding to commands.")
         _log_race_guidance()
         return
     except ConnectionError as exc:
