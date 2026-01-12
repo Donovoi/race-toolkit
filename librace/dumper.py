@@ -37,15 +37,17 @@ class RACEDumper:
         packet_prep: Callable that creates a packet for a given address
     """
 
-    def __init__(self, progress: bool):
+    def __init__(self, progress: bool, response_timeout: float | None = 10.0):
         """Initialize the dumper.
 
         Args:
             progress: Whether to show a progress bar during dump.
+            response_timeout: Max seconds to wait for a response per unit (None = no timeout).
         """
         self.stop_event = asyncio.Event()
         self.outbuf = b""
         self.progress = progress
+        self.response_timeout = response_timeout
         self.had_errors = False
         # These are set by subclasses or in dump()
         self.r: RACE
@@ -97,7 +99,7 @@ class RACEDumper:
                     await self.send(race_packet)
 
                     # Wait for response before proceeding to the next page
-                    await self.await_response()
+                    await self.await_response(address)
 
                     # Update progress bar by one unit
                     pbar.update(1)
@@ -112,12 +114,19 @@ class RACEDumper:
             while address < self.start + self.size:
                 race_packet = self.packet_prep(address)
                 logging.debug(
-                    "Sending %s/%s", hex(address), hex(self.start + self.size))
-                logging.debug("\n%s", hexdump(race_packet.pack(), 'return'))
+                    "RACE %s read request: addr=%s end=%s",
+                    self.desc,
+                    hex(address),
+                    hex(self.start + self.size),
+                )
+                logging.debug(
+                    "RACE TX packet (request bytes, not memory data):\n%s",
+                    hexdump(race_packet.pack(), "return"),
+                )
                 await self.send(race_packet)
 
                 # Wait for response before proceeding to the next page
-                await self.await_response()
+                await self.await_response(address)
 
                 address += self.unit_size
 
@@ -132,8 +141,8 @@ class RACEDumper:
     def recv(self, data: bytes):
         """Handle received data from the device."""
         if not self.progress:
-            logging.debug("Received response:")
-            logging.debug("\n%s", hexdump(data, 'return'))
+            logging.debug("RACE RX packet (raw response bytes):")
+            logging.debug("\n%s", hexdump(data, "return"))
         unpacked = self._unpack(data)
         # Only append data if we got valid bytes (not None from errors)
         if unpacked is not None and isinstance(unpacked, bytes):
@@ -153,10 +162,28 @@ class RACEDumper:
         """Unpack received data. Must be implemented by subclasses."""
         raise NotImplementedError("Subclasses must implement _unpack")
 
-    async def await_response(self):
+    async def await_response(self, address: int | None = None):
         """Wait for a response from the device."""
-        await self.stop_event.wait()
-        self.stop_event.clear()
+        try:
+            if self.response_timeout is None:
+                await self.stop_event.wait()
+            else:
+                await asyncio.wait_for(
+                    self.stop_event.wait(), timeout=self.response_timeout
+                )
+        except asyncio.TimeoutError as exc:
+            self.had_errors = True
+            if address is not None:
+                raise asyncio.TimeoutError(
+                    "No response received within %.1fs while reading %s at %s"
+                    % (self.response_timeout, self.desc, hex(address))
+                ) from exc
+            raise asyncio.TimeoutError(
+                "No response received within %.1fs while reading %s"
+                % (self.response_timeout, self.desc)
+            ) from exc
+        finally:
+            self.stop_event.clear()
 
 
 class RACERAMDumper(RACEDumper):

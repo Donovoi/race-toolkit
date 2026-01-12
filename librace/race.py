@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 from typing import Callable
 
 from librace.constants import RaceType
@@ -18,6 +20,9 @@ class RACE:
         self.recv_cb = None
         self.stop_event = asyncio.Event()
         self.send_delay = send_delay
+        self.last_rx_time = None
+        self.last_rx_type = None
+        self.last_rx_id = None
 
     async def send(self, race_packet: RacePacket):
         if self.send_delay > 0:
@@ -40,12 +45,31 @@ class RACE:
         if self.send_delay > 0:
             await asyncio.sleep(self.send_delay)
         await self.transport.send(race_packet.pack())
+        logging.debug(
+            "RACE send: id=0x%04X type=0x%02X len=0x%04X",
+            race_packet.header.id,
+            race_packet.header.type,
+            race_packet.header.length,
+        )
+        send_start = time.monotonic()
         try:
             await asyncio.wait_for(self.stop_event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
+            detail = (
+                "No inbound RACE notifications observed."
+                if self.last_rx_time is None or self.last_rx_time < send_start
+                else (
+                    "Received non-response RACE packets (last type=0x%02X, id=0x%04X)."
+                    % (
+                        self.last_rx_type or -1,
+                        self.last_rx_id or 0,
+                    )
+                )
+            )
             raise asyncio.TimeoutError(
-                f"No response received within {timeout}s. "
-                "The device may not support this command."
+                f"No response received within {timeout}s. {detail} "
+                "Likely causes: pairing/encryption required, device blocks RACE over BLE, "
+                "or address is not the active endpoint."
             )
         self.stop_event.clear()
         r = self.sync_payload
@@ -87,7 +111,23 @@ class RACE:
         # Have we gotten all the continuation data?
         if len(self.full_payload) - 4 >= self.expected_length:
             race_header = RaceHeader.unpack(
-                self.full_payload[: RaceHeader.SIZE])
+                self.full_payload[: RaceHeader.SIZE]
+            )
+            try:
+                type_name = RaceType(race_header.type).name
+            except ValueError:
+                type_name = "UNKNOWN"
+            self.last_rx_time = time.monotonic()
+            self.last_rx_type = race_header.type
+            self.last_rx_id = race_header.id
+            logging.debug(
+                "RACE recv: id=0x%04X type=0x%02X(%s) len=0x%04X total=%d",
+                race_header.id,
+                race_header.type,
+                type_name,
+                race_header.length,
+                len(self.full_payload),
+            )
 
             if self.recv_cb:
                 self.recv_cb(self.full_payload)
@@ -96,6 +136,11 @@ class RACE:
             # only stop blocking once we got the actual reponse, not the response indication
             if race_header.type == RaceType.RESPONSE:
                 self.stop_event.set()
+            else:
+                logging.debug(
+                    "RACE recv: non-response packet (type=0x%02X), waiting for RESPONSE",
+                    race_header.type,
+                )
 
             self.full_payload = b""
             self.expected_length = None

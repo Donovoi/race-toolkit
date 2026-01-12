@@ -181,7 +181,8 @@ class BumbleTransport(Transport):
 
         if authenticate:
             logging.warning(
-                "Flag --authenticate is set. Will try to establish a pairing with the target device. If the device is already paired this might fail."
+                "Flag --authenticate is set. Will try to establish a pairing with the target device. "
+                "If pairing fails, try pairing in the OS/phone first or use --transport rfcomm."
             )
 
     async def _initialize_device(self, classic: bool = False, le: bool = False):
@@ -591,10 +592,11 @@ class GATTBumbleTransport(BumbleTransport):
             (self.address, self.name) = result
 
         # Connect to the remote device with timeout
+        logging.info("Connecting to %s over BLE...", self.address)
         try:
             self.connection = await asyncio.wait_for(
                 self.device.connect(self.address, transport=BT_LE_TRANSPORT),
-                timeout=15.0
+                timeout=15.0,
             )
         except asyncio.TimeoutError:
             raise ConnectionError(
@@ -607,10 +609,31 @@ class GATTBumbleTransport(BumbleTransport):
             return
 
         if self.authenticate:
-            await self.connection.authenticate()
+            logging.info("Authenticating with target device (pairing may be required)...")
+            try:
+                await asyncio.wait_for(self.connection.authenticate(), timeout=15.0)
+            except asyncio.TimeoutError as exc:
+                raise ConnectionError(
+                    "Authentication timed out. Put the device into pairing mode and try again."
+                ) from exc
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                err_str = str(exc)
+                if "UNKNOWN_CONNECTION_IDENTIFIER" in err_str:
+                    raise ConnectionError(
+                        "Authentication failed: the device disconnected during pairing. "
+                        "If it was already in pairing mode, it likely rejects LE pairing or "
+                        "requires an OS/phone bond. Pair in the OS/phone first and rerun "
+                        "without --authenticate, or use --transport rfcomm with the Classic address."
+                    ) from exc
+                raise ConnectionError(f"Authentication failed: {exc}") from exc
 
         if self.name is None:
-            self.name = await self.connection.request_remote_name()
+            try:
+                self.name = await asyncio.wait_for(
+                    self.connection.request_remote_name(), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logging.warning("Remote name request timed out; continuing.")
 
         await self.setup_gatt(recv_fn)
 
@@ -625,20 +648,45 @@ class GATTBumbleTransport(BumbleTransport):
         # Request maximum MTU for better throughput (512 is common max for many devices)
         # Will negotiate down if device doesn't support it
         try:
-            mtu = await self.client.request_mtu(512)
+            mtu = await asyncio.wait_for(self.client.request_mtu(512), timeout=5.0)
             logging.info(f"Negotiated GATT MTU to {mtu}.")
+        except asyncio.TimeoutError:
+            logging.warning("MTU negotiation timed out. Using default MTU.")
+            mtu = 23  # BLE minimum
         except Exception as e:
             logging.warning(f"MTU negotiation failed: {e}. Using default MTU.")
             mtu = 23  # BLE minimum
 
         # Discover only the services we need for faster connection
-        await self.client.discover_services(
-            [UuidTable.AIROHA_GATT_SERVICE_UUID, UuidTable.SONY_GATT_SERVICE_UUID]
-        )
+        try:
+            await asyncio.wait_for(
+                self.client.discover_services(
+                    [
+                        UuidTable.AIROHA_GATT_SERVICE_UUID,
+                        UuidTable.SONY_GATT_SERVICE_UUID,
+                    ]
+                ),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            logging.error("Service discovery timed out.")
+            return
         # Discover characteristics only for services we found (faster than all)
         for service in self.client.services:
-            if service.uuid in [UuidTable.AIROHA_GATT_SERVICE_UUID, UuidTable.SONY_GATT_SERVICE_UUID]:
-                await service.discover_characteristics()
+            if service.uuid in [
+                UuidTable.AIROHA_GATT_SERVICE_UUID,
+                UuidTable.SONY_GATT_SERVICE_UUID,
+            ]:
+                try:
+                    await asyncio.wait_for(
+                        service.discover_characteristics(), timeout=10.0
+                    )
+                except asyncio.TimeoutError:
+                    logging.error(
+                        "Characteristic discovery timed out for service %s.",
+                        service.uuid,
+                    )
+                    return
 
         service_uuids = [s.uuid for s in self.client.services]
 
@@ -683,9 +731,16 @@ class GATTBumbleTransport(BumbleTransport):
         self.recv_fn = recv_fn
 
         # Subscribe to notifications on the notify characteristic.
-        await self.client.subscribe(
-            self.rx_char_handle, self._recv_internal, prefer_notify=True
-        )
+        try:
+            await asyncio.wait_for(
+                self.client.subscribe(
+                    self.rx_char_handle, self._recv_internal, prefer_notify=True
+                ),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            logging.error("Notification subscription timed out.")
+            return
 
     async def send(self, data: bytes):
         if not self.client:
