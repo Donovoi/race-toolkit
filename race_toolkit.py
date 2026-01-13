@@ -735,7 +735,8 @@ def select_classic_device(
 
     # Always prompt user to select - even with one device it may not be the right one
     logging.info("Found %d Bluetooth Classic device(s):", len(devices))
-    for i, (addr, name) in enumerate(devices):
+    # Display devices in reverse order (strongest at bottom near input), cancel at bottom
+    for i, (addr, name) in reversed(list(enumerate(devices))):
         logging.info("  [%d] %s (%s)", i, name, addr)
     logging.info("  [X] None of these / Enter address manually")
 
@@ -1374,8 +1375,8 @@ def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict | None = 
         title=f"FOUND {len(devices_with_rssi)} BLE DEVICE(S)",
     )
 
-    # Add devices to table
-    for i, (address, name, rssi) in enumerate(devices_with_rssi):
+    # Add devices to table in reverse order (weakest first, strongest at bottom near input)
+    for i, (address, name, rssi) in reversed(list(enumerate(devices_with_rssi))):
         # Sanitize display data
         display_name = (
             sanitize_display(name) if name and name != "(unknown)" else "(Unknown)"
@@ -1393,7 +1394,7 @@ def _display_and_select_ble_device(devices_dict: dict, rssi_dict: dict | None = 
             style=style,
         )
 
-    # Add cancel option
+    # Add cancel option at bottom (near input prompt)
     table.add_row("[X]", "None of these devices is mine", "", "", style="dim")
 
     print_table(table)
@@ -8268,7 +8269,9 @@ async def command_rfparty(args: argparse.Namespace):
 
         # Open Bumble transport
         async with await open_transport_or_link(controller) as (hci_source, hci_sink):
-            device = Device("RFParty Scanner", host=hci_source, host_sink=hci_sink)
+            device_config = DeviceConfiguration()
+            device_config.name = "RFParty Scanner"
+            device = Device.from_config_with_hci(device_config, hci_source, hci_sink)
 
             # Set up scanning callback
             @device.on("advertisement")

@@ -83,8 +83,7 @@ class GATTBleakTransport(Transport):
         self.client = BleakClient(self.address)
         await self.client.connect()
 
-        logging.info(
-            f"Connected to {self.address.name} ({self.address.address})")
+        logging.info(f"Connected to {self.address.name} ({self.address.address})")
 
         service_uuids = [
             UUID(self.client.services.services[s].uuid)
@@ -171,9 +170,7 @@ class GATTBleakTransport(Transport):
 class BumbleTransport(Transport):
     """Generic Class for all Bumble based Transport. Does most of the Bumble and device handling"""
 
-    def __init__(
-        self, ctrl_dev: Device, address: str | Address, authenticate: bool
-    ):
+    def __init__(self, ctrl_dev: Device, address: str | Address, authenticate: bool):
         self.ctrl_dev = ctrl_dev
         self.address = address
         self.connection = None
@@ -204,16 +201,13 @@ class BumbleTransport(Transport):
             config.le_connection_latency = 0  # No latency for responsive transfers
             config.le_supervision_timeout = 500  # 5 second timeout
 
-        self.device = Device.from_config_with_hci(
-            config, self.t.source, self.t.sink)
+        self.device = Device.from_config_with_hci(config, self.t.source, self.t.sink)
         if classic:
             self.device.classic_enabled = True
         if le:
             self.device.le_enabled = True
         await self.device.power_on()
-        logging.info(
-            "Bluetooth controller initialized (%s).", self.ctrl_dev
-        )
+        logging.info("Bluetooth controller initialized (%s).", self.ctrl_dev)
 
     async def change_bd_addr(self, new_addr: Address):
         """Change the BD address of the controller. Works only on Broadcom/Cypress controlelrs."""
@@ -303,9 +297,9 @@ class GATTBumbleChecker(BumbleTransport):
                     ln = adv.data.get(0x08)
 
                 # Method 2: Try Bumble constants (version-dependent)
-                if not ln and hasattr(AdvertisingData, 'COMPLETE_LOCAL_NAME'):
+                if not ln and hasattr(AdvertisingData, "COMPLETE_LOCAL_NAME"):
                     ln = adv.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
-                if not ln and hasattr(AdvertisingData, 'SHORTENED_LOCAL_NAME'):
+                if not ln and hasattr(AdvertisingData, "SHORTENED_LOCAL_NAME"):
                     ln = adv.data.get(AdvertisingData.SHORTENED_LOCAL_NAME)
 
             except (AttributeError, KeyError, TypeError):
@@ -314,7 +308,7 @@ class GATTBumbleChecker(BumbleTransport):
             # Ensure it's a string if we found a name
             if ln:
                 if isinstance(ln, bytes):
-                    ln = ln.decode('utf-8', errors='replace')
+                    ln = ln.decode("utf-8", errors="replace")
 
             addr_str = str(adv.address)
             # Update device info - keep best name if we get a better one later
@@ -330,7 +324,7 @@ class GATTBumbleChecker(BumbleTransport):
             active=True,  # Active scanning gets more device info
             filter_duplicates=True,
             scan_interval=96,  # 60ms (units of 0.625ms) - faster than default
-            scan_window=48     # 30ms duty cycle - good balance
+            scan_window=48,  # 30ms duty cycle - good balance
         )
 
         # Show progress while scanning
@@ -343,8 +337,9 @@ class GATTBumbleChecker(BumbleTransport):
         devices = list(device_dict.items())
         if len(devices) > 0:
             # Sort by RSSI (strongest signal first)
-            devices_with_rssi = [(addr, name, rssi_dict.get(addr, -999))
-                                 for addr, name in devices]
+            devices_with_rssi = [
+                (addr, name, rssi_dict.get(addr, -999)) for addr, name in devices
+            ]
             devices_with_rssi.sort(key=lambda x: x[2], reverse=True)
 
             # Print table header
@@ -354,26 +349,36 @@ class GATTBumbleChecker(BumbleTransport):
 
             # Column headers
             print(f"  {'#':<4} {'NAME':<35} {'ADDRESS':<20} {'RSSI':>6}")
-            print(f"  {'-'*4} {'-'*35} {'-'*20} {'-'*6}")
+            print(f"  {'-' * 4} {'-' * 35} {'-' * 20} {'-' * 6}")
 
-            # Print devices
-            for i, (address, name, rssi) in enumerate(devices_with_rssi):
+            # Print devices in reverse order (weakest first, strongest at bottom near input)
+            for i, (address, name, rssi) in reversed(
+                list(enumerate(devices_with_rssi))
+            ):
                 # Format name: show "(Unknown)" if no name available
                 display_name = name if name else "(Unknown)"
                 # Truncate long names
                 if len(display_name) > 34:
                     display_name = display_name[:31] + "..."
 
-                rssi_color = "\033[1;32m" if rssi > - \
-                    70 else "\033[0;33m" if rssi > -85 else "\033[0;90m"
+                rssi_color = (
+                    "\033[1;32m"
+                    if rssi > -70
+                    else "\033[0;33m"
+                    if rssi > -85
+                    else "\033[0;90m"
+                )
                 print(
-                    f"  \033[1;36m[{i}]\033[0m  {display_name:<35} {address:<20} {rssi_color}{rssi:>4}dBm\033[0m")
+                    f"  \033[1;36m[{i}]\033[0m  {display_name:<35} {address:<20} {rssi_color}{rssi:>4}dBm\033[0m"
+                )
 
+            # Cancel option at bottom (near input prompt)
             print(f"  \033[1;36m[X]\033[0m  None of these devices is mine")
             print(f"\n\033[1;36m{'─' * 80}\033[0m\n")
 
             chosen = input(
-                "Which device is yours? Enter number [0-%d] or X: " % (len(devices) - 1)).strip()
+                "Which device is yours? Enter number [0-%d] or X: " % (len(devices) - 1)
+            ).strip()
             if chosen.lower() == "x":
                 logging.info("User chose to skip BLE device selection.")
                 return False
@@ -383,11 +388,11 @@ class GATTBumbleChecker(BumbleTransport):
                     if 0 <= chosen < len(devices_with_rssi):
                         selected = devices_with_rssi[chosen]
                         logging.info(
-                            f"Selected: {selected[1] if selected[1] else selected[0]} ({selected[0]})")
+                            f"Selected: {selected[1] if selected[1] else selected[0]} ({selected[0]})"
+                        )
                         return (selected[0], selected[1])
                     else:
-                        logging.error(
-                            "Invalid selection. Number out of range.")
+                        logging.error("Invalid selection. Number out of range.")
                         return False
                 except ValueError:
                     logging.error("Invalid input. Please enter a number or X.")
@@ -399,8 +404,7 @@ class GATTBumbleChecker(BumbleTransport):
             logging.info("  - Make sure your device is powered on")
             logging.info("  - Try moving closer to the device")
             logging.info("  - Some devices only advertise when not connected")
-            logging.info(
-                "  - If you know the address, use --target-address directly")
+            logging.info("  - If you know the address, use --target-address directly")
             return False
 
     async def check_UUIDs(self, address: str):
@@ -409,7 +413,7 @@ class GATTBumbleChecker(BumbleTransport):
         try:
             self.connection = await asyncio.wait_for(
                 self.device.connect(self.address, transport=BT_LE_TRANSPORT),
-                timeout=30.0
+                timeout=30.0,
             )
         except asyncio.TimeoutError:
             logging.error("Connection timed out after 30 seconds.")
@@ -472,25 +476,21 @@ class RFCOMMBumbleChecker(BumbleTransport):
         # Connect to the remote device with timeout
         try:
             self.connection = await asyncio.wait_for(
-                self.device.connect(
-                    self.address, transport=BT_BR_EDR_TRANSPORT),
-                timeout=30.0  # 30 second timeout for Bluetooth Classic connection
+                self.device.connect(self.address, transport=BT_BR_EDR_TRANSPORT),
+                timeout=30.0,  # 30 second timeout for Bluetooth Classic connection
             )
         except asyncio.TimeoutError:
             logging.error("Connection timed out after 30 seconds.")
             raise ConnectionError("Connection timed out") from None
 
         try:
-            await asyncio.wait_for(
-                self.connection.request_remote_name(),
-                timeout=10.0
-            )
+            await asyncio.wait_for(self.connection.request_remote_name(), timeout=10.0)
         except asyncio.TimeoutError:
             logging.warning("Remote name request timed out.")
 
         channels = await asyncio.wait_for(
             find_rfcomm_channels(self.connection),
-            timeout=30.0  # 30 second timeout for SDP query
+            timeout=30.0,  # 30 second timeout for SDP query
         )
         for chn in channels:
             uuid = RFCOMMTransport._matches_any_known_uuid(channels[chn])
@@ -506,8 +506,7 @@ class RFCOMMBumbleChecker(BumbleTransport):
         rfcomm_client = None
         try:
             hfp_record = await asyncio.wait_for(
-                hfp.find_hf_sdp_record(self.connection),
-                timeout=15.0
+                hfp.find_hf_sdp_record(self.connection), timeout=15.0
             )
             if not hfp_record:
                 logging.warning("HfP Service not found.")
@@ -516,15 +515,9 @@ class RFCOMMBumbleChecker(BumbleTransport):
             channel, _, _ = hfp_record
 
             rfcomm_client = RFCOMM_Client(self.connection)
-            rfcomm_mux = await asyncio.wait_for(
-                rfcomm_client.start(),
-                timeout=15.0
-            )
+            rfcomm_mux = await asyncio.wait_for(rfcomm_client.start(), timeout=15.0)
 
-            session = await asyncio.wait_for(
-                rfcomm_mux.open_dlc(channel),
-                timeout=15.0
-            )
+            session = await asyncio.wait_for(rfcomm_mux.open_dlc(channel), timeout=15.0)
             if session:
                 await rfcomm_mux.disconnect()
                 return True
@@ -540,8 +533,7 @@ class RFCOMMBumbleChecker(BumbleTransport):
             return False
         except Exception as e:  # pylint: disable=broad-exception-caught
             logging.warning(
-                "Error while checking Bluetooth Classic authentication (%s).",
-                e
+                "Error while checking Bluetooth Classic authentication (%s).", e
             )
             return False
         finally:
@@ -611,7 +603,9 @@ class GATTBumbleTransport(BumbleTransport):
             return
 
         if self.authenticate:
-            logging.info("Authenticating with target device (pairing may be required)...")
+            logging.info(
+                "Authenticating with target device (pairing may be required)..."
+            )
             try:
                 await asyncio.wait_for(self.connection.authenticate(), timeout=15.0)
             except asyncio.TimeoutError as exc:
@@ -751,10 +745,17 @@ class GATTBumbleTransport(BumbleTransport):
         # Use write without response when possible for better throughput
         # Fall back to with_response if characteristic doesn't support it
         try:
-            if hasattr(self.tx_char_handle, 'properties') and 'write-without-response' in self.tx_char_handle.properties:
-                await self.client.write_value(self.tx_char_handle, data, with_response=False)
+            if (
+                hasattr(self.tx_char_handle, "properties")
+                and "write-without-response" in self.tx_char_handle.properties
+            ):
+                await self.client.write_value(
+                    self.tx_char_handle, data, with_response=False
+                )
             else:
-                await self.client.write_value(self.tx_char_handle, data, with_response=True)
+                await self.client.write_value(
+                    self.tx_char_handle, data, with_response=True
+                )
         except Exception:
             # Fallback to with_response if write-without-response fails
             await self.client.write_value(self.tx_char_handle, data, with_response=True)
@@ -792,22 +793,23 @@ class GATTBumbleTransport(BumbleTransport):
             ln = None
             try:
                 ln = adv.data.get(0x09) or adv.data.get(0x08)
-                if not ln and hasattr(AdvertisingData, 'COMPLETE_LOCAL_NAME'):
+                if not ln and hasattr(AdvertisingData, "COMPLETE_LOCAL_NAME"):
                     ln = adv.data.get(AdvertisingData.COMPLETE_LOCAL_NAME)
-                if not ln and hasattr(AdvertisingData, 'SHORTENED_LOCAL_NAME'):
+                if not ln and hasattr(AdvertisingData, "SHORTENED_LOCAL_NAME"):
                     ln = adv.data.get(AdvertisingData.SHORTENED_LOCAL_NAME)
             except (AttributeError, KeyError, TypeError):
                 pass
 
             if ln:
                 if isinstance(ln, bytes):
-                    ln = ln.decode('utf-8', errors='replace')
+                    ln = ln.decode("utf-8", errors="replace")
 
                 # if we have a user-supplied list of devices, filter for them
                 if self.devices:
                     if self.matches(self.devices, ln):
                         logging.info(
-                            f"Found device {ln} - {adv.address} (RSSI: {adv.rssi}dBm)")
+                            f"Found device {ln} - {adv.address} (RSSI: {adv.rssi}dBm)"
+                        )
                         device_dict[adv.address] = ln
                         rssi_dict[adv.address] = adv.rssi
                 else:
@@ -821,7 +823,7 @@ class GATTBumbleTransport(BumbleTransport):
             active=True,
             filter_duplicates=True,
             scan_interval=96,  # 60ms
-            scan_window=48     # 30ms
+            scan_window=48,  # 30ms
         )
 
         # Wait with timeout instead of infinite loop
@@ -836,7 +838,7 @@ class GATTBumbleTransport(BumbleTransport):
         if len(device_dict) == 0:
             logging.warning(
                 "No BLE devices found after %.0fs. The device may use Bluetooth Classic instead.",
-                timeout
+                timeout,
             )
             return None
 
@@ -847,12 +849,16 @@ class GATTBumbleTransport(BumbleTransport):
                 return (address, name)
 
             # Sort by RSSI (strongest first) for better UX
-            devices_with_rssi = [(addr, name, rssi_dict.get(addr, -999))
-                                 for addr, name in devices]
+            devices_with_rssi = [
+                (addr, name, rssi_dict.get(addr, -999)) for addr, name in devices
+            ]
             devices_with_rssi.sort(key=lambda x: x[2], reverse=True)
 
             logging.info(f"Found {len(devices)} matching devices:")
-            for i, (address, name, rssi) in enumerate(devices_with_rssi):
+            # Display in reverse order (weakest first, strongest at bottom near input)
+            for i, (address, name, rssi) in reversed(
+                list(enumerate(devices_with_rssi))
+            ):
                 logging.info(f"[{i}]: {name} ({address}) - RSSI: {rssi}dBm")
 
             chosen = -1
@@ -896,9 +902,7 @@ class RFCOMMTransport(BumbleTransport):
             elif uuid == UuidTable.COMMON_SPP_UUID:
                 vendor = "Common"
             if vendor != "":
-                logging.info(
-                    "Found RACE UUID %s for vendor %s", uuid, vendor
-                )
+                logging.info("Found RACE UUID %s for vendor %s", uuid, vendor)
                 return uuid
         return None
 
@@ -963,8 +967,7 @@ class RFCOMMTransport(BumbleTransport):
         if not self.uuid:
             channels = await find_rfcomm_channels(self.connection)
             for chn in channels:
-                uuid = RFCOMMTransport._matches_any_known_uuid(
-                    channels[chn])
+                uuid = RFCOMMTransport._matches_any_known_uuid(channels[chn])
                 if uuid:
                     self.uuid = uuid
 
@@ -974,9 +977,7 @@ class RFCOMMTransport(BumbleTransport):
             return
 
         # Find RACE channel based on its UUID
-        channel = await find_rfcomm_channel_with_uuid(
-            self.connection, self.uuid
-        )
+        channel = await find_rfcomm_channel_with_uuid(self.connection, self.uuid)
         if channel is None:
             logging.error("Channel not found.")
             return
@@ -1072,8 +1073,7 @@ class USBHIDTransport(Transport):
             return
 
         self._flush_hid_buffer()
-        outbuf = USBHIDTransport.USB_RACE_PREFIX + \
-            struct.pack("<H", len(data)) + data
+        outbuf = USBHIDTransport.USB_RACE_PREFIX + struct.pack("<H", len(data)) + data
         self.device.write(outbuf)
 
         if self.recv_fn:
@@ -1084,7 +1084,7 @@ class USBHIDTransport(Transport):
             # then receive until we get empty responses
             while length > 0:
                 if response[0] == 0x07:
-                    self.recv_fn(response[3: 3 + length])
+                    self.recv_fn(response[3 : 3 + length])
                 (response, length) = self._read_report()
 
     async def close(self):
